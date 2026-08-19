@@ -62,23 +62,24 @@ and the base model's output does not follow the format at all without it
 well below the deterministic oracle (0.295), which is expected pre-training
 and is exactly the gap P3's GRPO run is meant to close.
 
-### GPU jobs, checked at writeup time via `ssh sophia qstat -u eric-spencer`
+### GPU jobs (final check 2026-08-19 01:30 CDT)
 
-Both jobs were **still running** (elapsed ~1 minute each, 30-minute walltime budget):
+- **175613** (`ascii-llm-train`, improved OCR, 30k samples, 15 epochs): **finished**.
+  Best epoch 14: per_char_acc 0.819, exact_acc 0.545 (final epoch 15: 0.810 / 0.531).
+  Baseline job 175601 (same recipe, old model, 10k samples): 0.122 / 0.002.
+- **175612** (`ascii-rlvr`, attempt 1) died on tokenizer load — compute nodes have no
+  internet; fixed with `HF_HUB_OFFLINE=1`. Attempt 2 (175614) ran the baseline eval on GPU
+  and produced `eval_1787118629.jsonl`: constrained format pass-rate 1.00, mean reward
+  0.135; unconstrained 0.00 / 0.0; oracle 0.351. It then crashed importing
+  `trl.trainer.grpo_trainer` (system-site vllm `.so` has an undefined torch symbol);
+  fixed with the `rlvr/_te_stub/vllm` shadow package. Attempt 3 (**175616**) was
+  submitted at 01:25 CDT and had not finished at writeup; check
+  `rlvr/logs/*.jsonl` and `logs/rlvr.out` on Sophia for the 50-step GRPO curve.
 
-- **175612** (`ascii-rlvr`, log `logs/rlvr.out`): baseline eval + 50-step
-  GRPO. At check time, the log showed only the "ensuring pyfiglet/pillow"
-  and "baseline eval" header lines -- no new eval JSON or GRPO step numbers
-  had landed yet beyond the two `.jsonl` baseline files above.
-- **175613** (`ascii-llm-train`, log `logs/train.out`): improved OCR run,
-  30k samples. At check time, `grep '^Epoch' logs/train.out` returned
-  nothing -- no epoch lines had been written yet.
-
-Numbers above are what existed at check time; both jobs may have produced
-more by the time this is read. Re-check with:
+Re-check with:
 
 ```bash
-ssh sophia "qstat -u eric-spencer; grep -E '^Epoch' /grand/EVITA/eric-spencer/ascii-llm-training/logs/train.out | tail -5; ls /grand/EVITA/eric-spencer/ascii-llm-training/rlvr/logs"
+ssh sophia "qstat -u eric-spencer; grep -v it/s /grand/EVITA/eric-spencer/ascii-llm-training/logs/rlvr.out | tail; ls /grand/EVITA/eric-spencer/ascii-llm-training/rlvr/logs"
 ```
 
 ### Legacy word-OCR baseline (before redesign)
@@ -97,9 +98,8 @@ Redesign (`model.py`, `data_prep.py`): `Grid2DPositionalEmbedding` (learned
 row + column embeddings) and per-character learned query vectors that
 cross-attend into the full encoder output via `nn.MultiheadAttention`,
 instead of mean-pooling. 6 unit tests covering both the legacy and new grid
-path pass. **No GPU validation run for the redesign has completed as of
-this writeup** -- job 175613 (30k samples) is the run intended to produce
-that number; see the GPU jobs section above for its live status.
+path pass. GPU validation (job 175613, 30k samples, 15 epochs): **per_char_acc 0.819,
+exact_acc 0.545** at the best epoch, versus 0.122 / 0.002 for the old model.
 
 ## How to reproduce
 

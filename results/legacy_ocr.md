@@ -92,3 +92,21 @@ baseline's 0.12/0.002 by epoch 15.
 - `/Users/eric/GitHub/ascii-llm-training/tests/test_pipeline.py`
 - `/Users/eric/GitHub/ascii-llm-training/scripts/train_sophia.pbs`
 - `/Users/eric/GitHub/ascii-llm-training/results/legacy_ocr.md` (new)
+
+
+## Result of the redesign (job 175613, 30k samples, 15 epochs, GPU)
+
+| epoch | train_loss | val_loss | per_char_acc | exact_acc |
+|-------|-----------|----------|---------------|-----------|
+| 1  | 3.218 | 3.027 | 0.094 | 0.000 |
+| 2  | 2.883 | 2.737 | 0.149 | 0.001 |
+| 12 | 0.696 | 0.675 | 0.799 | 0.507 |
+| 13 | 0.670 | 0.619 | 0.812 | 0.531 |
+| 14 | 0.634 | 0.598 | 0.819 | 0.545 |
+| 15 | 0.617 | 0.654 | 0.810 | 0.531 |
+
+Exact-match went from 0.002 (baseline, job 175601) to 0.545. Still climbing at epoch 15;
+more epochs / samples should push it further. Note this run also used 3x the data, so
+the architecture change and the data increase are not separated; the baseline
+architecture's mean-pool head cannot represent per-position output regardless of data,
+which is the argument for attributing most of the gain to the head.

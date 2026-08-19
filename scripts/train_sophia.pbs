@@ -15,7 +15,7 @@ mkdir -p logs data npz checkpoints
 PY=/grand/EVITA/eric-spencer/venvs/sophia-train/bin/python
 
 echo "== Generating dataset =="
-$PY ascii_generator.py --num-samples 10000 --out-dir data --multi-font
+$PY ascii_generator.py --num-samples 30000 --out-dir data --multi-font
 
 echo "== Preparing npz =="
 $PY data_prep.py --data-file data/dataset.jsonl --out npz/art_dataset.npz

@@ -65,6 +65,8 @@ def main():
     target_vocab = d['target_vocab'].tolist()
     max_input_len = int(d['max_input_len'])
     max_word_len = int(d['max_word_len'])
+    max_rows = int(d['max_rows']) if 'max_rows' in d else None
+    max_cols = int(d['max_cols']) if 'max_cols' in d else None
 
     pad_idx = target_vocab.index(PAD_TOKEN)
 
@@ -78,7 +80,8 @@ def main():
 
     model = AsciiTransformer(len(input_vocab), len(target_vocab), d_model=args.d_model, nhead=args.nhead,
                              num_layers=args.layers, dim_feedforward=args.ff, max_input_len=max_input_len,
-                             max_word_len=max_word_len, dropout=args.dropout)
+                             max_word_len=max_word_len, dropout=args.dropout,
+                             max_rows=max_rows, max_cols=max_cols)
     model.to(args.device)
 
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
@@ -132,6 +135,8 @@ def main():
                     'target_vocab': target_vocab,
                     'max_input_len': max_input_len,
                     'max_word_len': max_word_len,
+                    'max_rows': max_rows,
+                    'max_cols': max_cols,
                     'model_args': {
                         'd_model': args.d_model,
                         'nhead': args.nhead,

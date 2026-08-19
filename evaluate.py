@@ -35,8 +35,11 @@ def main():
 
     ckpt = load_checkpoint(args.checkpoint)
     model_args = ckpt['config']['model_args']
+    ckpt_max_rows = ckpt['config'].get('max_rows')
+    ckpt_max_cols = ckpt['config'].get('max_cols')
     model = AsciiTransformer(len(input_vocab), len(target_vocab), max_input_len=max_input_len,
-                             max_word_len=max_word_len, **model_args)
+                             max_word_len=max_word_len, max_rows=ckpt_max_rows, max_cols=ckpt_max_cols,
+                             **model_args)
     model.load_state_dict(ckpt['model_state'])
     model.to(args.device)
     model.eval()

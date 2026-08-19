@@ -196,6 +196,46 @@ class RewardLogger:
         return rewards
 
 
+
+def _patch_generate_with_constraints(trainer, args):
+    """Force TRL's rollout sampling through the grid constraint processor.
+
+    TRL calls `unwrapped_model.generate(**inputs, generation_config=...)` and
+    exposes no hook for a `LogitsProcessor`, so wrap the bound `generate` of
+    the underlying model. Without this, every rollout is unconstrained, every
+    completion fails `check_constraints`, and the verifier reward is
+    identically 0 -- which is exactly what job 175620 showed (50 steps,
+    reward 0.0, grad_norm 0.0, no learning signal at all).
+    """
+    from transformers import LogitsProcessorList
+
+    from rlvr.constrained import GridConstraintLogitsProcessor
+
+    model = trainer.model
+    tokenizer = trainer.processing_class
+    original_generate = model.generate
+
+    def generate(*a, **kw):
+        input_ids = kw.get("input_ids")
+        if input_ids is None and a:
+            input_ids = a[0]
+        if input_ids is not None:
+            processor = GridConstraintLogitsProcessor(
+                tokenizer=tokenizer,
+                cols=args.cols,
+                rows=args.rows,
+                charset=args.charset,
+                prompt_len=int(input_ids.shape[1]),
+            )
+            existing = kw.get("logits_processor") or LogitsProcessorList()
+            existing.append(processor)
+            kw["logits_processor"] = existing
+        return original_generate(*a, **kw)
+
+    model.generate = generate
+    print("rollout generation is constrained (GridConstraintLogitsProcessor attached)")
+
+
 def run_train(args):
     from peft import LoraConfig
     from trl import GRPOConfig, GRPOTrainer
@@ -236,6 +276,10 @@ def run_train(args):
         train_dataset=dataset,
         peft_config=lora_config,
     )
+
+    if args.constrained_rollout:
+        _patch_generate_with_constraints(trainer, args)
+
     trainer.train()
     print(f"training log: {log_path}")
 
@@ -253,6 +297,14 @@ def main():
     p.add_argument("--device", default="cpu", help="cpu or cuda; pass --device cuda on GPU nodes")
     p.add_argument("--output-dir", default=str(Path(__file__).parent / "checkpoints"))
     p.add_argument("--eval-only", action="store_true")
+    p.add_argument(
+        "--constrained-rollout",
+        action="store_true",
+        default=True,
+        help="sample rollouts through the grid constraint processor (default on; "
+        "without it the verifier reward is identically zero)",
+    )
+    p.add_argument("--no-constrained-rollout", dest="constrained_rollout", action="store_false")
     args = p.parse_args()
 
     if args.eval_only:

@@ -155,6 +155,8 @@ class RewardLogger:
     functions once per generation batch during training, so this doubles as
     a per-step log."""
 
+    __name__ = "ascii_verifier_reward"  # TRL names reward columns from this
+
     def __init__(self, log_path):
         self.log_path = log_path
         self.step = 0

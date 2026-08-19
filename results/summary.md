@@ -72,9 +72,12 @@ and is exactly the gap P3's GRPO run is meant to close.
   and produced `eval_1787118629.jsonl`: constrained format pass-rate 1.00, mean reward
   0.135; unconstrained 0.00 / 0.0; oracle 0.351. It then crashed importing
   `trl.trainer.grpo_trainer` (system-site vllm `.so` has an undefined torch symbol);
-  fixed with the `rlvr/_te_stub/vllm` shadow package. Attempt 3 (**175616**) was
-  submitted at 01:25 CDT and had not finished at writeup; check
-  `rlvr/logs/*.jsonl` and `logs/rlvr.out` on Sophia for the 50-step GRPO curve.
+  fixed with the `rlvr/_te_stub/vllm` shadow package. Attempt 3 (175616) re-ran the
+  baseline eval (`eval_1787120901.jsonl`: constrained 1.00 / 0.143, unconstrained 0 / 0,
+  oracle 0.351) then crashed in `GRPOTrainer.__init__` because the `RewardLogger`
+  callable had no `__name__`; fixed. Attempt 4 (**175617-ish, submitted 01:52 CDT**) is
+  the first one expected to actually reach GRPO steps; check `rlvr/logs/*.jsonl` and
+  `logs/rlvr.out` on Sophia for the 50-step curve.
 
 Re-check with:
 

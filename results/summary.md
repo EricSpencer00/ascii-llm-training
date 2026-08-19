@@ -100,6 +100,35 @@ whether reward climbs via SSIM alone -- that would be the uniform-fill hack
 appearing, and is the first thing to check before believing any reward gain.
 
 
+### GRPO learns once the hack is closed (job 175665, 600 steps)
+
+600 steps, Qwen2.5-0.5B-Instruct + LoRA, 24x12 grid, 8 generations, 40 tasks,
+2h04m on one GPU. Means over consecutive 100-step windows:
+
+| steps | reward | ssim | edge | format pass |
+|-------|--------|------|------|-------------|
+| 0-100 | 0.0092 | 0.2283 | 0.0229 | 1.00 |
+| 100-200 | 0.0137 | 0.2155 | 0.0342 | 1.00 |
+| 200-300 | 0.0249 | 0.2018 | 0.0620 | 1.00 |
+| 300-400 | 0.0356 | 0.1815 | 0.0887 | 1.00 |
+| 400-500 | 0.0383 | 0.1776 | 0.0954 | 1.00 |
+| 500-600 | 0.0402 | 0.1622 | 0.1002 | 1.00 |
+
+Reward rose 4.4x and it is monotonic across all six windows. The direction of
+the components is what makes this believable rather than another hack: the
+**edge score rose 4.4x while raw SSIM fell** (0.228 -> 0.162). A policy gaming
+the density floor would show the opposite -- SSIM climbing, edges flat. Format
+pass-rate stays pinned at 1.00 by construction, so none of the gain comes from
+learning the grid format; it is all likeness.
+
+Caveats, stated plainly: 0.040 is still an order of magnitude below the
+deterministic converter oracle (~0.30), so this is a learning signal, not a
+competitive method. The reward is training-time on the training tasks; run
+175665 set `save_strategy="no"` and saved no adapter, so there was no artifact
+to sample or to score on held-out tasks. Job **175759** repeats the run with
+the adapter persisted and a post-training eval on a disjoint task seed, which
+is the number that would actually support a claim.
+
 ### The empty-grid reward hack (found 2026-08-19, fixed)
 
 Sampling the trained-baseline policy under constrained decoding on a

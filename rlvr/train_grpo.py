@@ -95,6 +95,29 @@ def _generate(model, tokenizer, prompt, cols, rows, charset, device, constrained
     return tokenizer.decode(completion_ids, skip_special_tokens=True)
 
 
+def _eval_tasks(model, tokenizer, tasks, device, constrained=True) -> dict:
+    """Score a model on `tasks` and return {format_pass_rate, mean_reward,
+    oracle_mean_reward}. Shared by the pre-training baseline eval and the
+    post-training held-out eval so both numbers are computed identically."""
+    model.eval()
+    rewards, oks, oracle = [], [], []
+    for t in tasks:
+        text = _generate(model, tokenizer, t.prompt, t.cols, t.rows, t.charset, device, constrained)
+        r = score_one(text, t.image, t.cols, t.rows, t.charset)
+        rewards.append(r["reward"])
+        oks.append(1.0 if r["constraints"]["ok"] else 0.0)
+        oracle.append(score_one(t.oracle_text(), t.image, t.cols, t.rows, t.charset)["reward"])
+    model.train()
+    n = max(1, len(tasks))
+    return {
+        "n_tasks": len(tasks),
+        "constrained": constrained,
+        "format_pass_rate": sum(oks) / n,
+        "mean_reward": sum(rewards) / n,
+        "oracle_mean_reward": sum(oracle) / n,
+    }
+
+
 def run_eval(args):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -265,7 +288,7 @@ def run_train(args):
         max_completion_length=args.cols * args.rows + args.rows + 8,
         temperature=1.0,
         logging_steps=1,
-        save_strategy="no",
+        save_strategy="no",  # adapter is saved explicitly after training instead
         report_to=[],
     )
 
@@ -281,6 +304,28 @@ def run_train(args):
         _patch_generate_with_constraints(trainer, args)
 
     trainer.train()
+
+    # Persist the adapter and run a held-out eval with it. Run 175665 trained
+    # fine but saved nothing, so its gain could only be read off training-time
+    # reward -- there was no artifact left to sample or to score on tasks the
+    # policy had not been trained on.
+    adapter_dir = Path(args.output_dir) / "adapter"
+    trainer.model.save_pretrained(str(adapter_dir))
+    print(f"adapter saved: {adapter_dir}")
+
+    eval_tasks = generate_tasks(
+        args.n_tasks,
+        seed=args.seed + 10_000,  # disjoint from the training tasks
+        cols=args.cols,
+        rows=args.rows,
+        charset=args.charset,
+    )
+    post = _eval_tasks(
+        trainer.model, trainer.processing_class, eval_tasks, args.device, constrained=True
+    )
+    post_path = LOG_DIR / f"posteval_{int(time.time())}.json"
+    post_path.write_text(json.dumps(post, indent=2))
+    print("post-training held-out eval:", json.dumps(post))
     print(f"training log: {log_path}")
 
 

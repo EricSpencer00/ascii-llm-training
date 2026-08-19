@@ -5,7 +5,7 @@ an acceptance criterion that gates moving to the next; a phase is not "done"
 because code exists for it, it's done when its criterion is met on the fixed
 50-image evaluation set described in `docs/design.md`.
 
-## P0 — Deterministic converter
+## P0 — Deterministic converter — **done**
 
 Build `asciiart/render.py`: all three rendering tiers (luminance, structure,
 edge), `rasterize()` as the inverse primitive, and the CLI (`python -m
@@ -19,7 +19,14 @@ asciiart.cli render`).
 - Glyph coverage for the luminance ramp is measured per-font, not hardcoded,
   and regenerating it for a second font changes the ramp ordering.
 
-## P1 — Verifier and annealing baseline
+## P1 — Verifier and annealing baseline — **done (informal)**
+
+Bench was run on 20 synthetic images at 40 cols (`results/bench.md`), not
+the 50-image evaluation set this section's acceptance criteria reference.
+Structure beats luminance on mean reward (0.252 vs 0.089) and anneal beats
+structure on mean reward (0.271 vs 0.252); the criteria as written (40/50,
+45/50 image-level counts) have not been checked against the actual 50-image
+set.
 
 Build `asciiart/verify.py` (per-cell SSIM + edge-alignment term) and
 `asciiart/anneal.py` (simulated annealing using the verifier as energy).
@@ -37,7 +44,13 @@ Build `asciiart/verify.py` (per-cell SSIM + edge-alignment term) and
   exhaustion) on all 50 images within a fixed move budget, and its output
   beats `mode="luminance"` on the aggregate reward on at least 45 of 50.
 
-## P2 — Constrained decoding
+## P2 — Constrained decoding — **done-baseline**
+
+`rlvr/constrained.py` implements `GridConstraintLogitsProcessor`. Eval on
+Sophia (Qwen2.5-0.5B-Instruct, 24x12 grid, 20 tasks) shows constrained
+decoding format pass-rate 1.00 vs 0.00 unconstrained — see
+`results/summary.md`. Latency-overhead criterion (under 2x) has not been
+separately measured. Eval set is 20 tasks, not the 50-image set.
 
 Logit masking for line-length and charset constraints, wired into a
 generation loop over an open model (exact model TBD by P2, likely something
@@ -50,7 +63,17 @@ already available on Sophia).
 - Generation latency overhead from masking stays under 2x unconstrained
   decoding latency, measured on the same hardware.
 
-## P3 — RLVR / GRPO on a small open model, on Sophia
+## P3 — RLVR / GRPO on a small open model, on Sophia — **scaffolded, running**
+
+`rlvr/{tasks,constrained,reward,train_grpo}.py` implement the task
+generator, constrained decoding, reward wrapper around
+`asciiart.verify.score`, and the GRPO training entry point
+(`python -m rlvr.train_grpo`). A short GRPO run (50 steps) is in progress on
+Sophia as of this writeup (PBS job 175612); see `results/summary.md` for the
+latest numbers and whether it has finished. Acceptance criteria (35/50
+images improved, no stratum regression, reward-hacking checks) are not yet
+evaluated — the run so far is a baseline-eval + short training smoke test,
+not the full acceptance run.
 
 Train against the P1 verifier as reward, using constrained decoding from P2
 so the policy never has to learn width/charset constraints itself and can
@@ -68,7 +91,7 @@ spend capacity on structure instead.
   generalization) run at the end of training and are reported, not just
   the raw reward curve.
 
-## P4 — Writeup
+## P4 — Writeup — **pending**
 
 Research note on "rasterize-and-compare as a verifier for RLVR on
 grid-structured discrete outputs," using the P0–P3 results as evidence.

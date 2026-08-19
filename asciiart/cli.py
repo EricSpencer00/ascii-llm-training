@@ -93,6 +93,9 @@ def main():
     import sys
 
     argv = sys.argv[1:]
+    if argv and argv[0] in ("-h", "--help"):
+        p.parse_args(argv)
+        return
     if not argv or argv[0] not in known_commands:
         p_render_default = argparse.ArgumentParser(description="Render an image as ASCII art.")
         _add_render_args(p_render_default)

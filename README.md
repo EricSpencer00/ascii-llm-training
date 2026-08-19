@@ -36,7 +36,15 @@ asciiart/           deterministic image -> ASCII converter, verifier, search bas
 docs/
   design.md           full argument, algorithms, reward-hacking risks, eval protocol
   roadmap.md          phased plan with acceptance criteria
-scripts/             ALCF Sophia PBS job scripts
+rlvr/                constrained decoding + GRPO/RLVR training on Sophia (P2/P3)
+  constrained.py      GridConstraintLogitsProcessor (row length / charset / EOS)
+  tasks.py             synthetic prompt/target-image task generator
+  reward.py            TRL GRPOTrainer reward function wrapping asciiart.verify.score
+  train_grpo.py         python -m rlvr.train_grpo (--eval-only or full GRPO run)
+  _te_stub/            stub that shadows a broken transformer_engine import on Sophia
+scripts/             ALCF Sophia PBS job scripts (run_baseline_sophia.sh,
+  train_sophia.pbs, rlvr_sophia.pbs)
+results/             bench.md, legacy_ocr.md, summary.md — numbers pulled from runs
 legacy word-OCR pipeline (see below): ascii_generator.py, data_prep.py,
   model.py, train.py, evaluate.py, config.py
 ```
@@ -62,7 +70,25 @@ See `docs/design.md` for the SSIM-per-cell formula, the edge-alignment term,
 the anneal move set and schedule, and the reward-hacking risks the verifier
 is designed to close off. See `docs/roadmap.md` for the phased build order
 (converter, verifier + anneal, constrained decoding, RLVR/GRPO on Sophia,
-writeup) and the acceptance criteria for each phase.
+writeup), the acceptance criteria for each phase, and current per-phase
+status. See `results/summary.md` for a one-page status of what has actually
+been run, with numbers and reproduction commands.
+
+## RLVR / constrained decoding (P2/P3)
+
+`rlvr/` runs constrained-decoding eval and GRPO training against the P1
+verifier as reward, using `Qwen/Qwen2.5-0.5B-Instruct` on ALCF Sophia:
+
+```bash
+python -m rlvr.train_grpo --eval-only --model Qwen/Qwen2.5-0.5B-Instruct \
+    --cols 24 --rows 12 --n-tasks 20 --device cuda
+
+python -m rlvr.train_grpo --model Qwen/Qwen2.5-0.5B-Instruct \
+    --cols 24 --rows 12 --steps 50 --num-generations 8 --n-tasks 20 --device cuda
+```
+
+See `scripts/rlvr_sophia.pbs` for the full PBS job and `results/summary.md`
+for the latest baseline/GRPO numbers.
 
 ## Legacy word-OCR pipeline
 
@@ -112,9 +138,10 @@ and `Y` int64 arrays plus lengths; `vocabs.json` holds `input_vocab` and
 ## Roadmap
 
 Phased build order, acceptance criteria, and current status live in
-`docs/roadmap.md`. Short version: P0 deterministic converter, P1 verifier
-and annealing baseline, P2 constrained decoding, P3 RLVR/GRPO on a small
-open model on ALCF Sophia, P4 writeup.
+`docs/roadmap.md`. Short version: P0 deterministic converter (done), P1
+verifier and annealing baseline (done, informal 20-image bench), P2
+constrained decoding (done-baseline), P3 RLVR/GRPO on a small open model on
+ALCF Sophia (scaffolded, short run in progress), P4 writeup (pending).
 
 ## License
 

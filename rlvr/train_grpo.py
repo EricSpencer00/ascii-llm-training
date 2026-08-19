@@ -57,9 +57,12 @@ def _generate(model, tokenizer, prompt, cols, rows, charset, device, constrained
 
     if getattr(tokenizer, "chat_template", None):
         messages = [{"role": "user", "content": prompt}]
-        input_ids = tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt"
-        ).to(device)
+        enc = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt",
+            return_dict=True,
+        )
+        # transformers>=5 returns a BatchEncoding; older versions a tensor.
+        input_ids = (enc["input_ids"] if hasattr(enc, "keys") else enc).to(device)
     else:
         # Fallback for base/tiny models with no chat template (used for
         # local CPU smoke tests; the sophia run uses an -Instruct model

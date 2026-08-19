@@ -1,0 +1,26 @@
+#!/bin/bash
+#PBS -N ascii-llm-train
+#PBS -A EVITA
+#PBS -q single-gpu
+#PBS -l select=1
+#PBS -l walltime=00:30:00
+#PBS -l filesystems=home:grand
+#PBS -o /grand/EVITA/eric-spencer/ascii-llm-training/logs/train.out
+#PBS -e /grand/EVITA/eric-spencer/ascii-llm-training/logs/train.err
+
+set -e
+cd /grand/EVITA/eric-spencer/ascii-llm-training
+mkdir -p logs data npz checkpoints
+
+PY=/grand/EVITA/eric-spencer/venvs/sophia-train/bin/python
+
+echo "== Generating dataset =="
+$PY ascii_generator.py --num-samples 10000 --out-dir data --multi-font
+
+echo "== Preparing npz =="
+$PY data_prep.py --data-file data/dataset.jsonl --out npz/art_dataset.npz
+
+echo "== Training =="
+$PY train.py --data npz/art_dataset.npz --epochs 15 --d-model 192 --device cuda
+
+echo "== Done =="

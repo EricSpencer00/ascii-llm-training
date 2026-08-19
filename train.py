@@ -86,7 +86,7 @@ def main():
 
     ckpt_dir = Path('checkpoints')
     ckpt_dir.mkdir(exist_ok=True)
-    best_val = 0.0
+    best_val = float('-inf')
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -135,8 +135,8 @@ def main():
                     'model_args': {
                         'd_model': args.d_model,
                         'nhead': args.nhead,
-                        'layers': args.layers,
-                        'ff': args.ff,
+                        'num_layers': args.layers,
+                        'dim_feedforward': args.ff,
                         'dropout': args.dropout
                     }
                 }

@@ -62,28 +62,42 @@ and the base model's output does not follow the format at all without it
 well below the deterministic oracle (0.295), which is expected pre-training
 and is exactly the gap P3's GRPO run is meant to close.
 
-### GPU jobs (final check 2026-08-19 01:30 CDT)
+### RLVR / GRPO on Sophia (job 175639, final)
 
-- **175613** (`ascii-llm-train`, improved OCR, 30k samples, 15 epochs): **finished**.
-  Best epoch 14: per_char_acc 0.819, exact_acc 0.545 (final epoch 15: 0.810 / 0.531).
-  Baseline job 175601 (same recipe, old model, 10k samples): 0.122 / 0.002.
-- **175612** (`ascii-rlvr`, attempt 1) died on tokenizer load — compute nodes have no
-  internet; fixed with `HF_HUB_OFFLINE=1`. Attempt 2 (175614) ran the baseline eval on GPU
-  and produced `eval_1787118629.jsonl`: constrained format pass-rate 1.00, mean reward
-  0.135; unconstrained 0.00 / 0.0; oracle 0.351. It then crashed importing
-  `trl.trainer.grpo_trainer` (system-site vllm `.so` has an undefined torch symbol);
-  fixed with the `rlvr/_te_stub/vllm` shadow package. Attempt 3 (175616) re-ran the
-  baseline eval (`eval_1787120901.jsonl`: constrained 1.00 / 0.143, unconstrained 0 / 0,
-  oracle 0.351) then crashed in `GRPOTrainer.__init__` because the `RewardLogger`
-  callable had no `__name__`; fixed. Attempt 4 (**175620**, submitted 01:52 CDT) is
-  the first one expected to actually reach GRPO steps; check `rlvr/logs/*.jsonl` and
-  `logs/rlvr.out` on Sophia for the 50-step curve.
+The first four attempts never reached a training step (offline HF cache,
+transformers-5 `apply_chat_template` return type, broken system `vllm`/
+`transformer_engine` shared objects, TRL requiring `__name__` on reward
+callables). Job 175620 then ran 50 steps with **reward identically 0.0 and
+grad_norm 0.0**: TRL samples rollouts through its own `generate` call and
+exposes no logits-processor hook, so every rollout was unconstrained, every
+completion failed the hard predicates, and the reward was zero by
+construction. `_patch_generate_with_constraints` in `rlvr/train_grpo.py`
+wraps the model's bound `generate` to fix this.
 
-Re-check with:
+Job 175639, 50 steps, Qwen2.5-0.5B-Instruct + LoRA, 24x12 grid, 8 generations:
 
-```bash
-ssh sophia "qstat -u eric-spencer; grep -v it/s /grand/EVITA/eric-spencer/ascii-llm-training/logs/rlvr.out | tail; ls /grand/EVITA/eric-spencer/ascii-llm-training/rlvr/logs"
-```
+| window | mean_reward | mean_ssim | mean_edge | format_pass_rate |
+|--------|-------------|-----------|-----------|------------------|
+| first 17 steps | 0.1427 | 0.2234 | 0.0216 | 1.000 |
+| last 17 steps  | 0.1419 | 0.2244 | 0.0180 | 1.000 |
+
+Baseline eval from the same job: constrained format pass-rate 1.00 / reward
+0.131, unconstrained 0.00 / 0.0, converter oracle 0.346.
+
+Reading, stated plainly: constrained decoding works and now holds during
+training (100% valid grids on every step, versus 0% unconstrained). GRPO
+itself produced **no measurable improvement over 50 steps** -- reward is flat
+within noise. That is not evidence the approach fails; 50 steps with a LoRA
+on a 0.5B model is a smoke test, not a training run. What it does establish
+is that the pipeline is now capable of learning (nonzero, varying reward with
+real gradients) where before it structurally could not.
+
+Also worth noting: `mean_edge` is near zero (~0.02) while SSIM carries almost
+all of the reward. The policy is producing plausible density but essentially
+no edge alignment, so the anti-uniform-fill term is not yet biting on policy
+output the way it does on the converter comparison. A longer run should watch
+whether reward climbs via SSIM alone -- that would be the uniform-fill hack
+appearing, and is the first thing to check before believing any reward gain.
 
 ### Legacy word-OCR baseline (before redesign)
 

@@ -99,6 +99,50 @@ output the way it does on the converter comparison. A longer run should watch
 whether reward climbs via SSIM alone -- that would be the uniform-fill hack
 appearing, and is the first thing to check before believing any reward gain.
 
+
+### The empty-grid reward hack (found 2026-08-19, fixed)
+
+Sampling the trained-baseline policy under constrained decoding on a
+"filled circle" task returned **twelve rows of spaces** -- a completely blank
+grid -- and the verifier paid it **0.190**, against an oracle of 0.393. Blank
+output was worth 48% of the converter's score. Raw SSIM is the culprit: the
+targets are mostly dark, so drawing nothing matches most of the image. On a
+filled-circle target the oracle's raw SSIM (0.493) is actually *below* the
+blank grid's (0.494); every bit of real signal lives in the edge term.
+
+Fix: `score()` now reports `ssim_gain = (ssim - ssim_blank) / (1 - ssim_blank)`
+clipped at zero, and the reward uses the gain rather than raw SSIM. The blank
+grid now scores exactly 0.000. The normalization anchor (blank-vs-target)
+differs from the objective, so the policy cannot move it.
+
+This also explains the flat 50-step GRPO curve: reward ~0.14 with `mean_edge`
+~0.02 is the signature of a policy sitting on near-blank output, collecting
+the SSIM floor and never being pushed off it.
+
+Bench numbers after the fix (previous values in parentheses):
+
+| method | ssim | edge | reward |
+|---|---|---|---|
+| anneal (2000 steps) | 0.057 | 0.592 | **0.238** (0.271) |
+| structure | 0.059 | 0.541 | 0.217 (0.252) |
+| luminance | 0.040 | 0.162 | 0.066 (0.089) |
+| edge | 0.044 | 0.116 | 0.048 (0.073) |
+
+Ordering is unchanged; every method loses the free SSIM floor it was being
+paid before.
+
+### Open issues
+
+- `render(mode="structure")` renders a smooth 0->255 gradient as an
+  **all-blank grid**. The per-cell glyph match is dominated by gradient
+  structure, so a smooth cell picks space regardless of its brightness. This
+  made `test_score_perfect_self_match` vacuous (it asserted a high score on
+  blank-vs-blank); the test now uses a circle. The converter behavior itself
+  is unfixed.
+- The SSIM term contributes almost nothing on these synthetic targets; the
+  reward is effectively edge-F1 with an SSIM tiebreaker. A perceptual metric
+  better suited to sparse ink would be the real fix.
+
 ### Legacy word-OCR baseline (before redesign)
 
 Job 175601, 10k samples, 15 epochs, d_model=192 (`results/legacy_ocr.md`):

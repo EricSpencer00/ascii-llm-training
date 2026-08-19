@@ -75,7 +75,7 @@ and is exactly the gap P3's GRPO run is meant to close.
   fixed with the `rlvr/_te_stub/vllm` shadow package. Attempt 3 (175616) re-ran the
   baseline eval (`eval_1787120901.jsonl`: constrained 1.00 / 0.143, unconstrained 0 / 0,
   oracle 0.351) then crashed in `GRPOTrainer.__init__` because the `RewardLogger`
-  callable had no `__name__`; fixed. Attempt 4 (**175617-ish, submitted 01:52 CDT**) is
+  callable had no `__name__`; fixed. Attempt 4 (**175620**, submitted 01:52 CDT) is
   the first one expected to actually reach GRPO steps; check `rlvr/logs/*.jsonl` and
   `logs/rlvr.out` on Sophia for the 50-step curve.
 

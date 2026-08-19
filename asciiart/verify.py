@@ -177,19 +177,29 @@ def _edge_f1(x: np.ndarray, y: np.ndarray, tol: int = 1) -> float:
 _BLANK_SSIM_CACHE: dict = {}
 
 
-def _blank_ssim(target_resized, cols: int, rows: int, font: Font) -> float:
+def _blank_ssim(target_resized, rendered_shape, font: Font) -> float:
     """SSIM of an all-space grid of this shape against the target.
 
     Cached per (target bytes, cols, rows, cell size): the blank raster is the
     same for every candidate scored against a given target, and recomputing it
     per annealing move would double the cost of the inner loop.
     """
-    key = (hash(target_resized.tobytes()), cols, rows, font.cell_h, font.cell_w)
+    # Derive the blank grid from the *rendered* raster shape, not from the
+    # declared cols/rows: a candidate whose row/col count disagrees with the
+    # declared grid (exactly what an unconstrained policy emits) rasterizes to
+    # a different pixel shape, and building the baseline from cols/rows then
+    # produces a shape mismatch inside SSIM. This crashed the first 600-step
+    # GRPO run.
+    key = (hash(target_resized.tobytes()), rendered_shape, font.cell_h, font.cell_w)
     hit = _BLANK_SSIM_CACHE.get(key)
     if hit is not None:
         return hit
-    blank = "\n".join(" " * cols for _ in range(rows))
+    n_rows = max(1, rendered_shape[0] // font.cell_h)
+    n_cols = max(1, rendered_shape[1] // font.cell_w)
+    blank = "\n".join(" " * n_cols for _ in range(n_rows))
     blank_raster = rasterize(blank, font=font)
+    if blank_raster.shape != target_resized.shape:
+        blank_raster = np.zeros_like(target_resized)
     win = max(4, min(font.cell_h, font.cell_w))
     val = _ssim_windowed(blank_raster, target_resized, win=win)
     _BLANK_SSIM_CACHE[key] = val
@@ -233,7 +243,7 @@ def score(
     # emitted under constrained decoding: 12 rows of spaces, reward 0.190
     # against an oracle 0.393. Scoring the *gain over blank* makes the empty
     # grid worth exactly zero, so the anchor differs from the objective.
-    ssim_blank = _blank_ssim(target_resized, cols, rows, font)
+    ssim_blank = _blank_ssim(target_resized, rendered.shape, font)
     denom = 1.0 - ssim_blank
     ssim_gain = 0.0 if denom <= 1e-9 else max(0.0, (ssim - ssim_blank) / denom)
 

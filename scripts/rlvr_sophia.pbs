@@ -1,0 +1,42 @@
+#!/bin/bash
+#PBS -N ascii-rlvr
+#PBS -A EVITA
+#PBS -q single-gpu
+#PBS -l select=1
+#PBS -l walltime=00:30:00
+#PBS -l filesystems=home:grand
+#PBS -o /grand/EVITA/eric-spencer/ascii-llm-training/logs/rlvr.out
+#PBS -e /grand/EVITA/eric-spencer/ascii-llm-training/logs/rlvr.err
+
+# P2/P3 acceptance run: baseline eval (format pass-rate with/without
+# constrained decoding, mean reward vs the deterministic converter oracle)
+# followed by a short GRPO run against the asciiart.verify reward.
+set -e
+cd /grand/EVITA/eric-spencer/ascii-llm-training
+mkdir -p logs rlvr/logs rlvr/checkpoints
+
+export HF_HOME=/grand/EVITA/eric-spencer/hf-cache
+export PIP_CACHE_DIR=/grand/EVITA/eric-spencer/.pipcache
+# rlvr/_te_stub comes first so it shadows the system-site-packages
+# `transformer_engine` that crashes `import peft` on this system (broken
+# libtransformer_engine.so vs. the loaded libcublasLt) -- see
+# rlvr/_te_stub/transformer_engine.py for the full explanation.
+export PYTHONPATH=rlvr/_te_stub:.
+
+PY=/grand/EVITA/eric-spencer/venvs/sophia-train/bin/python
+MODEL=Qwen/Qwen2.5-0.5B-Instruct
+COLS=24
+ROWS=12
+
+echo "== Ensuring pyfiglet/pillow present =="
+$PY -m pip install --quiet pyfiglet pillow || true
+
+echo "== Baseline eval: constrained vs unconstrained decoding =="
+$PY -m rlvr.train_grpo --eval-only --model "$MODEL" --cols $COLS --rows $ROWS \
+    --n-tasks 20 --device cuda
+
+echo "== Short GRPO run =="
+$PY -m rlvr.train_grpo --model "$MODEL" --cols $COLS --rows $ROWS \
+    --steps 50 --num-generations 8 --n-tasks 20 --device cuda
+
+echo "== Done =="

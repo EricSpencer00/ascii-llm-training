@@ -16,6 +16,7 @@ cd /grand/EVITA/eric-spencer/ascii-llm-training
 mkdir -p logs rlvr/logs rlvr/checkpoints
 
 export HF_HOME=/grand/EVITA/eric-spencer/hf-cache
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export PIP_CACHE_DIR=/grand/EVITA/eric-spencer/.pipcache
 # rlvr/_te_stub comes first so it shadows the system-site-packages
 # `transformer_engine` that crashes `import peft` on this system (broken

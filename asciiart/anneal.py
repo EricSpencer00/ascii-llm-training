@@ -74,7 +74,7 @@ def anneal(
     w1: float = W_SSIM,
     w2: float = W_EDGE,
     t0: float | None = None,
-    alpha: float = 0.995,
+    alpha: float | None = None,
     init_text: str | None = None,
 ):
     """Anneal a character grid against `target_img`.
@@ -109,7 +109,36 @@ def anneal(
     cur_energy = -cur_reward
 
     if t0 is None:
-        t0 = 0.05
+        # Calibrate T0 from a short burn-in so the initial acceptance rate
+        # for energy-increasing moves is roughly 0.3-0.5 (per docs/design.md),
+        # rather than a fixed constant that's typically orders of magnitude
+        # larger than the actual per-move reward delta (single-cell swaps
+        # move reward by ~1e-3, not ~1e-1) and so accepts near-uniformly,
+        # destroying the good `mode="structure"` starting point before any
+        # real cooling happens.
+        deltas = []
+        burn_n = min(40, max(10, steps // 20))
+        for _ in range(burn_n):
+            br, bc = rng.randrange(rows_n), rng.randrange(cols_n)
+            old_ch = grid[br][bc]
+            candidates = _coverage_biased_charset(font, charset, old_ch)
+            new_ch = rng.choice(candidates)
+            if new_ch == old_ch:
+                continue
+            _paint_cell(pixels, font, br, bc, new_ch)
+            trial_reward = _full_reward(pixels, target_resized, font, w1, w2)
+            _paint_cell(pixels, font, br, bc, old_ch)
+            deltas.append(abs(trial_reward - cur_reward))
+        mean_abs_delta = float(np.mean(deltas)) if deltas else 1e-3
+        # solve exp(-delta/T) = 0.4 for T at the mean delta magnitude
+        t0 = max(mean_abs_delta / 0.916, 1e-6)
+
+    if alpha is None:
+        # Cool from t0 down to a small fraction of it over the run, rather
+        # than a fixed alpha, so the schedule scales with the calibrated t0
+        # instead of being tuned for one particular reward magnitude.
+        t_end = t0 * 0.02
+        alpha = (t_end / t0) ** (1.0 / max(steps, 1))
 
     best_grid = [row[:] for row in grid]
     best_reward = cur_reward

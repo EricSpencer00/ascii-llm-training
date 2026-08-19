@@ -34,7 +34,11 @@ def test_check_constraints_bad_charset():
 
 
 def test_check_constraints_trailing_whitespace():
-    text = "ab \ncd"
+    # A space glyph in the last column of an exact-width row is legitimate
+    # content (space is a valid low-coverage charset member), not a
+    # violation. What's invalid is a stray trailing newline or CR/tab that
+    # falls outside the declared grid.
+    text = "ab \ncd\n"
     result = check_constraints(text, cols=3, rows=2, charset="abcd ")
     assert result["trailing_ws_ok"] is False
 
@@ -42,6 +46,12 @@ def test_check_constraints_trailing_whitespace():
 def test_check_constraints_blank_row_allowed():
     text = "  \ncd"
     result = check_constraints(text, cols=2, rows=2, charset="cd ")
+    assert result["trailing_ws_ok"] is True
+
+
+def test_check_constraints_space_as_last_column_allowed():
+    text = "ab \ncd "
+    result = check_constraints(text, cols=3, rows=2, charset="abcd ")
     assert result["trailing_ws_ok"] is True
 
 

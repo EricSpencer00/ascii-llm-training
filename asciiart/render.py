@@ -118,17 +118,18 @@ def _render_structure(gray: np.ndarray, cols: int, rows: int, ramp: str, font: F
         for c in range(cols):
             tile = _tile_resized_to_glyph(src, r, c, rows, cols, h, w, gh, gw)
             tmag, tang = _sobel(tile)
-            best_i, best_d = 0, float("inf")
-            for i in range(len(ramp)):
-                mse = float(np.mean((tile - ramp_glyphs[i]) ** 2))
-                # gradient-orientation term: penalize magnitude/angle mismatch
-                # weighted by where the tile actually has strong edges.
-                mag_diff = float(np.mean((tmag - ramp_gmag[i]) ** 2))
-                w_ang = tmag / (tmag.max() + 1e-6)
-                ang_diff = float(np.mean(w_ang * (1.0 - np.cos(tang - ramp_gang[i]))))
-                dist = mse + 0.5 * mag_diff + 0.5 * ang_diff
-                if dist < best_d:
-                    best_d, best_i = dist, i
+            # Batched distance against all K ramp glyphs at once (numpy
+            # broadcasting over the glyph axis) instead of a Python loop
+            # over the ramp — this K-loop was the dominant cost of
+            # structure mode (K ~ dozens to ~90 deduped glyphs per cell).
+            mse = ((tile[None, :, :] - ramp_glyphs) ** 2).mean(axis=(1, 2))
+            # gradient-orientation term: penalize magnitude/angle mismatch
+            # weighted by where the tile actually has strong edges.
+            mag_diff = ((tmag[None, :, :] - ramp_gmag) ** 2).mean(axis=(1, 2))
+            w_ang = tmag / (tmag.max() + 1e-6)
+            ang_diff = (w_ang[None, :, :] * (1.0 - np.cos(tang[None, :, :] - ramp_gang))).mean(axis=(1, 2))
+            dist = mse + 0.5 * mag_diff + 0.5 * ang_diff
+            best_i = int(np.argmin(dist))
             row_chars.append(ramp[best_i])
         lines.append("".join(row_chars))
     return "\n".join(lines)

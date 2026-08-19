@@ -3,7 +3,7 @@
 #PBS -A EVITA
 #PBS -q single-gpu
 #PBS -l select=1
-#PBS -l walltime=00:30:00
+#PBS -l walltime=03:00:00
 #PBS -l filesystems=home:grand
 #PBS -o /grand/EVITA/eric-spencer/ascii-llm-training/logs/rlvr.out
 #PBS -e /grand/EVITA/eric-spencer/ascii-llm-training/logs/rlvr.err
@@ -38,6 +38,6 @@ $PY -m rlvr.train_grpo --eval-only --model "$MODEL" --cols $COLS --rows $ROWS \
 
 echo "== Short GRPO run =="
 $PY -m rlvr.train_grpo --model "$MODEL" --cols $COLS --rows $ROWS \
-    --steps 50 --num-generations 8 --n-tasks 20 --device cuda
+    --steps 600 --num-generations 8 --n-tasks 40 --device cuda
 
 echo "== Done =="

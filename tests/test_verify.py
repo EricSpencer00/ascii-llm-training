@@ -61,14 +61,27 @@ def test_score_perfect_self_match():
     from asciiart.render import render, rasterize
 
     size_h, size_w = rows * font.cell_h, cols * font.cell_w
-    yy, xx = np.mgrid[0:size_h, 0:size_w]
-    img = ((xx / size_w) * 255).astype(np.uint8)
+    # Must be an image that actually renders to ink. A smooth gradient
+    # renders to an all-blank grid under structure mode (see the open issue
+    # in results/summary.md), which made this test vacuous: it was asserting
+    # a high score for blank-vs-blank, where SSIM is 1.0 by definition.
+    from PIL import Image, ImageDraw
+
+    pil = Image.new("L", (size_w, size_h), 0)
+    ImageDraw.Draw(pil).ellipse(
+        (size_w * 0.1, size_h * 0.1, size_w * 0.9, size_h * 0.9), outline=255, width=3
+    )
+    img = np.asarray(pil)
+    assert img.max() > 0
 
     text = render(img, cols=cols, rows=rows, mode="structure", font=font)
     rendered = rasterize(text, font=font)
     result = score(text, rendered, font=font, cols=cols, rows=rows)
     assert result["constraints"]["ok"] is True
     assert result["ssim"] > 0.9
+    # Rendering the target exactly is the best achievable score, so the
+    # gain-over-blank normalization must not penalize it.
+    assert result["ssim_gain"] > 0.9
     assert result["reward"] > 0.5
 
 

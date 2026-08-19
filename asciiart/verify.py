@@ -174,6 +174,28 @@ def _edge_f1(x: np.ndarray, y: np.ndarray, tol: int = 1) -> float:
     return float(2 * precision * recall / (precision + recall))
 
 
+_BLANK_SSIM_CACHE: dict = {}
+
+
+def _blank_ssim(target_resized, cols: int, rows: int, font: Font) -> float:
+    """SSIM of an all-space grid of this shape against the target.
+
+    Cached per (target bytes, cols, rows, cell size): the blank raster is the
+    same for every candidate scored against a given target, and recomputing it
+    per annealing move would double the cost of the inner loop.
+    """
+    key = (hash(target_resized.tobytes()), cols, rows, font.cell_h, font.cell_w)
+    hit = _BLANK_SSIM_CACHE.get(key)
+    if hit is not None:
+        return hit
+    blank = "\n".join(" " * cols for _ in range(rows))
+    blank_raster = rasterize(blank, font=font)
+    win = max(4, min(font.cell_h, font.cell_w))
+    val = _ssim_windowed(blank_raster, target_resized, win=win)
+    _BLANK_SSIM_CACHE[key] = val
+    return val
+
+
 def score(
     text: str,
     target_img,
@@ -203,14 +225,28 @@ def score(
     ssim = _ssim_windowed(rendered, target_resized, win=win)
     edge = _edge_f1(rendered, target_resized)
 
+    # Normalize SSIM against the all-blank grid of the same shape. An empty
+    # grid is a degenerate solution that scores surprisingly well in raw SSIM
+    # (a mostly-dark target is mostly-matched by drawing nothing), so a raw
+    # SSIM reward pays ~half the oracle's score for producing nothing. That is
+    # the dominant reward hack here, and it is what the 0.5B policy actually
+    # emitted under constrained decoding: 12 rows of spaces, reward 0.190
+    # against an oracle 0.393. Scoring the *gain over blank* makes the empty
+    # grid worth exactly zero, so the anchor differs from the objective.
+    ssim_blank = _blank_ssim(target_resized, cols, rows, font)
+    denom = 1.0 - ssim_blank
+    ssim_gain = 0.0 if denom <= 1e-9 else max(0.0, (ssim - ssim_blank) / denom)
+
     if not constraints["ok"]:
         reward = 0.0
     else:
-        reward = w1 * ssim + w2 * edge
+        reward = w1 * ssim_gain + w2 * edge
 
     return {
         "constraints": constraints,
         "ssim": ssim,
+        "ssim_blank": ssim_blank,
+        "ssim_gain": ssim_gain,
         "edge_score": edge,
         "reward": reward,
     }

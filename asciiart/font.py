@@ -34,11 +34,30 @@ _CANDIDATE_FONT_PATHS = [
 DEFAULT_CHARSET = "".join(chr(c) for c in range(FIRST_CODEPOINT, LAST_CODEPOINT + 1))
 
 
+def _matplotlib_font_path() -> str | None:
+    """DejaVuSansMono.ttf bundled inside matplotlib, if it is installed.
+
+    This gives a real TTF on machines with no system monospace font (CI
+    containers, minimal images) without needing a package manager.
+    """
+    try:
+        import matplotlib
+    except Exception:
+        return None
+    path = os.path.join(
+        os.path.dirname(matplotlib.__file__), "mpl-data", "fonts", "ttf", "DejaVuSansMono.ttf"
+    )
+    return path if os.path.exists(path) else None
+
+
 def _find_font_path() -> str | None:
+    override = os.environ.get("ASCIIART_FONT")
+    if override and os.path.exists(override):
+        return override
     for path in _CANDIDATE_FONT_PATHS:
         if os.path.exists(path):
             return path
-    return None
+    return _matplotlib_font_path()
 
 
 @dataclass

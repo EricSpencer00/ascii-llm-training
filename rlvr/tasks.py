@@ -3,7 +3,7 @@
 Each task pairs a deterministically-generated target image (simple shapes /
 text rendered with PIL, no external dataset) with a natural-language prompt
 asking the policy to draw it as a `cols x rows` ASCII grid over a fixed
-charset. `asciiart.render.render` (mode="structure") on the same image is
+charset. `asciiart.render.render` (mode="luminance") on the same image is
 included as the oracle/reference the policy is judged against, per
 docs/design.md's evaluation protocol.
 """
@@ -41,14 +41,22 @@ class Task:
     charset: str
     prompt: str
 
-    def oracle_text(self) -> str:
+    def oracle_text(self, mode: str = "luminance") -> str:
         """Deterministic converter output for this task's image -- the
-        reference every prompt-driven method is judged against."""
+        reference every prompt-driven method is judged against.
+
+        Defaults to `luminance`, not `structure`. This used to call
+        `structure`, which scores 0.078 on these tasks versus luminance's
+        0.846: the "oracle" was ten times weaker than the best deterministic
+        method available, which made the trained policy (0.110) look like it
+        beat the reference when it is in fact at 13% of it. An anchor that
+        weak flatters everything measured against it.
+        """
         return render(
             self.image,
             cols=self.cols,
             rows=self.rows,
-            mode="structure",
+            mode=mode,
             charset=self.charset,
         )
 

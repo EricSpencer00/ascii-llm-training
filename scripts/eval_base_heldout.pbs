@@ -1,0 +1,20 @@
+#!/bin/bash
+#PBS -N ascii-basev
+#PBS -A EVITA
+#PBS -q single-gpu
+#PBS -l select=1
+#PBS -l walltime=00:20:00
+#PBS -l filesystems=home:grand
+#PBS -o logs/basev.out
+#PBS -e logs/basev.err
+
+# Apples-to-apples baseline: the UNTRAINED model on the same held-out task
+# seed the post-training eval uses (train seed + 10000). Without this the
+# only base number available was on the training seed, which is not a
+# comparison.
+cd /grand/EVITA/eric-spencer/ascii-llm-training
+export HF_HOME=/grand/EVITA/eric-spencer/hf-cache
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+export PYTHONPATH=rlvr/_te_stub:.
+/grand/EVITA/eric-spencer/venvs/sophia-train/bin/python -m rlvr.train_grpo \
+  --eval-only --seed 10000 --n-tasks 40 --cols 24 --rows 12 --device cuda

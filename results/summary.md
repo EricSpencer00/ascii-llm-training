@@ -129,6 +129,41 @@ to sample or to score on held-out tasks. Job **175759** repeats the run with
 the adapter persisted and a post-training eval on a disjoint task seed, which
 is the number that would actually support a claim.
 
+### Held-out eval with the trained adapter (job 175759)
+
+Repeat of the 600-step run with the LoRA adapter persisted and a
+post-training eval on 40 tasks generated from a disjoint seed:
+
+| | format pass | mean reward | oracle |
+|---|---|---|---|
+| base model, constrained (training seed) | 1.00 | 0.0117 | 0.206 |
+| trained adapter, constrained (held-out seed) | 1.00 | 0.0287 | 0.212 |
+
+The gain survives on tasks the policy never trained on: **2.4x the base
+model's reward**, at 14% of the deterministic converter's score. The training
+curve reproduced the earlier run almost exactly (0.0092 -> 0.0400 across six
+100-step windows, edge 0.023 -> 0.100, SSIM 0.228 -> 0.165), so the effect is
+not a seed artifact.
+
+Sampled output on "a filled circle" (24x12, constrained), base vs trained:
+
+```
+BASE  reward=0.0068          TRAINED  reward=0.0266     ORACLE reward=0.2034
+.  +  *  #  @                .  +*#%@.                          *      *:
+  +  *  #                                                    :            *
+  +   *                                                     *              *
+  +                                                                         *
+  +                          .  +*#%@.                       %
+```
+
+Both models are mostly emitting charset-ordered filler rather than a shape.
+Training compacted the filler and roughly quadrupled the edge score, which is
+what the reward asked for, but the output is not recognizably a circle. The
+honest summary is that RLVR against this verifier produces a real, held-out,
+monotonic gain and a policy that is still nowhere near the converter it is
+being scored against. Closing that gap is a scale/steps question that 600
+steps on a 0.5B model does not answer.
+
 ### The empty-grid reward hack (found 2026-08-19, fixed)
 
 Sampling the trained-baseline policy under constrained decoding on a

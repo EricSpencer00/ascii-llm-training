@@ -29,6 +29,7 @@ import numpy as np
 
 from asciiart.font import Font, default_font
 from asciiart.render import _to_gray_array, _sobel, render as render_fn
+from asciiart.verify import _cell_means, _coverage_corr, _coverage_fidelity, score
 from asciiart.verify import _ssim_windowed, _edge_f1, _resize_gray, W_SSIM, W_EDGE
 
 
@@ -49,10 +50,18 @@ def _paint_cell(pixels: np.ndarray, font: Font, r: int, c: int, ch: str) -> None
 
 
 def _full_reward(pixels: np.ndarray, target: np.ndarray, font: Font, w1: float, w2: float) -> float:
-    win = max(4, min(font.cell_h, font.cell_w))
-    ssim = _ssim_windowed(pixels, target, win=win)
-    edge = _edge_f1(pixels, target)
-    return w1 * ssim + w2 * edge
+    """Search energy, kept identical to `verify.score`'s reward.
+
+    This function used to carry its own copy of the old pixel-SSIM/edge
+    formula. When the verifier moved to the cell grid, the search kept
+    optimizing the stale objective and its output scored *below its own
+    starting point* on the real metric. Anything that duplicates the reward
+    is a place for the search and the verifier to silently disagree, so this
+    now calls the same cell-level terms `verify.score` uses.
+    """
+    a = _cell_means(pixels, font)
+    b = _cell_means(target, font)
+    return 0.8 * _coverage_corr(a, b) + 0.2 * _coverage_fidelity(a, b)
 
 
 def _coverage_biased_charset(font: Font, charset: str, current_ch: str, k: int = 8) -> list[str]:
@@ -87,7 +96,19 @@ def anneal(
     charset = charset or font.luminance_ramp()
 
     if init_text is None:
-        init_text = render_fn(target_img, cols=cols, rows=rows, mode="structure", font=font, charset=charset)
+        # Start from whichever deterministic mode actually scores best on this
+        # image rather than assuming "structure". Under the cell-grid reward,
+        # plain luminance mapping beats structure by 3x on the bench, so a
+        # hardcoded structure init handed the search a bad starting point and
+        # 2000 steps were not enough to walk out of it.
+        candidates = [
+            render_fn(target_img, cols=cols, rows=rows, mode=m, font=font, charset=charset)
+            for m in ("luminance", "structure", "edge")
+        ]
+        init_text = max(
+            candidates,
+            key=lambda t: score(t, target_img, font=font, cols=cols, rows=rows)["reward"],
+        )
     grid = _grid_from_text(init_text)
     rows_n = len(grid)
     cols_n = max((len(r) for r in grid), default=cols)

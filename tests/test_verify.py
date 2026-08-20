@@ -78,10 +78,8 @@ def test_score_perfect_self_match():
     rendered = rasterize(text, font=font)
     result = score(text, rendered, font=font, cols=cols, rows=rows)
     assert result["constraints"]["ok"] is True
-    assert result["ssim"] > 0.9
-    # Rendering the target exactly is the best achievable score, so the
-    # gain-over-blank normalization must not penalize it.
-    assert result["ssim_gain"] > 0.9
+    # Rendering the target exactly is the best achievable score.
+    assert result["coverage_corr"] > 0.9
     assert result["reward"] > 0.5
 
 
@@ -104,3 +102,45 @@ def test_demonstrate_hack_uniform_fill_loses_on_combined_reward():
     # render's (not wildly lower), otherwise the demonstration is trivial
     # and doesn't isolate the edge term's contribution specifically.
     assert abs(result["hack"]["ssim"] - result["real"]["ssim"]) < 0.05
+
+
+def test_reward_prefers_a_render_that_looks_like_the_target():
+    """Regression for the metric bug that invalidated the first bench and the
+    first GRPO run: pixel edge-F1 scored a visibly-correct filled render 3x
+    BELOW a sparse render that ignored the shape, because rasterized glyph
+    texture reads as spurious edges. Score on the cell grid instead."""
+    from PIL import Image, ImageDraw
+    from asciiart.render import render
+
+    cols, rows = 24, 12
+    img = Image.new("L", (240, 240), 0)
+    ImageDraw.Draw(img).ellipse((30, 30, 210, 210), fill=255)
+
+    looks_right = render(img, cols=cols, rows=rows, mode="luminance")
+    sparse = render(img, cols=cols, rows=rows, mode="structure")
+
+    r_right = score(looks_right, img, cols=cols, rows=rows)["reward"]
+    r_sparse = score(sparse, img, cols=cols, rows=rows)["reward"]
+    assert r_right > r_sparse, (r_right, r_sparse)
+    assert r_right > 0.7
+
+
+def test_degenerate_output_scores_zero():
+    """Blank and solid fills carry no information about the target and must
+    score exactly 0 -- both were previously collecting a floor."""
+    import random
+
+    from PIL import Image, ImageDraw
+
+    cols, rows = 24, 12
+    img = Image.new("L", (240, 240), 0)
+    ImageDraw.Draw(img).ellipse((30, 30, 210, 210), fill=255)
+
+    blank = "\n".join(" " * cols for _ in range(rows))
+    solid = "\n".join("@" * cols for _ in range(rows))
+    noise = "\n".join(
+        "".join(random.Random(i).choice(" .:-=+*#%@") for _ in range(cols)) for i in range(rows)
+    )
+    assert score(blank, img, cols=cols, rows=rows)["reward"] == 0.0
+    assert score(solid, img, cols=cols, rows=rows)["reward"] == 0.0
+    assert score(noise, img, cols=cols, rows=rows)["reward"] < 0.2

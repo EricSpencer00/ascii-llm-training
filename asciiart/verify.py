@@ -206,6 +206,73 @@ def _blank_ssim(target_resized, rendered_shape, font: Font) -> float:
     return val
 
 
+def _cell_means(pixels: np.ndarray, font: Font) -> np.ndarray:
+    """Mean intensity per character cell -- the resolution the medium actually
+    has. Comparing at pixel resolution is what broke the previous reward: a
+    correctly-filled region rasterizes to glyph *texture*, whose internal
+    edges the smooth target does not have, so pixel-level edge-F1 scored a
+    visibly-correct fill 3x below a sparse render that ignored the shape."""
+    rows = max(1, pixels.shape[0] // font.cell_h)
+    cols = max(1, pixels.shape[1] // font.cell_w)
+    block = pixels[: rows * font.cell_h, : cols * font.cell_w]
+    return block.reshape(rows, font.cell_h, cols, font.cell_w).mean(axis=(1, 3))
+
+
+def _coverage_corr(a: np.ndarray, b: np.ndarray) -> float:
+    """Pearson correlation between per-cell ink coverage and per-cell target
+    brightness, clipped at 0. Blank or uniform output has no variance and
+    scores 0 by construction, so the empty grid needs no special case."""
+    x, y = a.ravel().astype(np.float64), b.ravel().astype(np.float64)
+    if x.std() < 1e-9 or y.std() < 1e-9 or x.size < 2:
+        return 0.0
+    with np.errstate(invalid="ignore", divide="ignore"):
+        c = np.corrcoef(x, y)[0, 1]
+    return 0.0 if not np.isfinite(c) else float(max(0.0, c))
+
+
+def _coverage_fidelity(a: np.ndarray, b: np.ndarray) -> float:
+    """1 - mean absolute difference of range-normalized cell maps. Correlation
+    is scale-invariant, so on its own it would accept output that has the
+    right shape at the wrong density; this term pins the density."""
+    if a.std() < 1e-9 or b.std() < 1e-9:
+        # Degenerate output (all blank, or a solid fill) carries no
+        # information about the target; without this guard it collects a
+        # ~0.55 floor from the mean-absolute-difference term, which is the
+        # same empty-grid hack in a new costume.
+        return 0.0
+
+    def norm(v):
+        lo, hi = float(v.min()), float(v.max())
+        return (v - lo) / (hi - lo) if hi - lo > 1e-9 else np.zeros_like(v)
+    return float(max(0.0, 1.0 - np.abs(norm(a) - norm(b)).mean()))
+
+
+def _cell_edge_f1(a: np.ndarray, b: np.ndarray, thresh: float = 0.12) -> float:
+    """Edge-F1 computed on the cell grids rather than the pixel grids, with a
+    one-cell dilation tolerance. This measures whether ink boundaries land in
+    the right cells, without seeing glyph-internal texture as edges."""
+    ma, _ = _sobel(a)
+    mb, _ = _sobel(b)
+    ea, eb = ma >= thresh, mb >= thresh
+    if not ea.any() and not eb.any():
+        return 1.0
+    if not ea.any() or not eb.any():
+        return 0.0
+
+    def dilate(mask):
+        out = mask.copy()
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                out |= np.roll(np.roll(mask, dy, axis=0), dx, axis=1)
+        return out
+
+    precision = np.logical_and(ea, dilate(eb)).sum() / max(ea.sum(), 1)
+    recall = np.logical_and(eb, dilate(ea)).sum() / max(eb.sum(), 1)
+    if precision + recall == 0:
+        return 0.0
+    return float(2 * precision * recall / (precision + recall))
+
+
 def score(
     text: str,
     target_img,
@@ -235,29 +302,36 @@ def score(
     ssim = _ssim_windowed(rendered, target_resized, win=win)
     edge = _edge_f1(rendered, target_resized)
 
-    # Normalize SSIM against the all-blank grid of the same shape. An empty
-    # grid is a degenerate solution that scores surprisingly well in raw SSIM
-    # (a mostly-dark target is mostly-matched by drawing nothing), so a raw
-    # SSIM reward pays ~half the oracle's score for producing nothing. That is
-    # the dominant reward hack here, and it is what the 0.5B policy actually
-    # emitted under constrained decoding: 12 rows of spaces, reward 0.190
-    # against an oracle 0.393. Scoring the *gain over blank* makes the empty
-    # grid worth exactly zero, so the anchor differs from the objective.
-    ssim_blank = _blank_ssim(target_resized, rendered.shape, font)
-    denom = 1.0 - ssim_blank
-    ssim_gain = 0.0 if denom <= 1e-9 else max(0.0, (ssim - ssim_blank) / denom)
+    # Score on the character cell grid, not the pixel grid. See _cell_means.
+    a_cells = _cell_means(rendered, font)
+    b_cells = _cell_means(target_resized, font)
+    coverage = _coverage_corr(a_cells, b_cells)
+    fidelity = _coverage_fidelity(a_cells, b_cells)
+    cell_edge = _cell_edge_f1(a_cells, b_cells)
+    # Reward is coverage-driven. The cell edge-F1 is computed and reported but
+    # deliberately kept out of the reward: with a one-cell dilation tolerance
+    # it scores random charset noise at 0.87, because dense random edges
+    # intersect any target's edge band. Coverage correlation separates the
+    # same cases cleanly (0.94 correct vs 0.00 noise).
+    shape = 0.8 * coverage + 0.2 * fidelity
 
     if not constraints["ok"]:
         reward = 0.0
     else:
-        reward = w1 * ssim_gain + w2 * edge
+        reward = shape
 
     return {
         "constraints": constraints,
+        # Retained for reference/diagnosis only -- neither term feeds the
+        # reward any more. Windowed pixel SSIM cannot separate the oracle from
+        # a blank grid on sparse ink (0.493 vs 0.494), and pixel edge-F1
+        # rewards sparsity; see results/summary.md.
         "ssim": ssim,
-        "ssim_blank": ssim_blank,
-        "ssim_gain": ssim_gain,
-        "edge_score": edge,
+        "pixel_edge_score": edge,
+        "coverage_corr": coverage,
+        "coverage_fidelity": fidelity,
+        "shape_score": shape,
+        "edge_score": cell_edge,
         "reward": reward,
     }
 

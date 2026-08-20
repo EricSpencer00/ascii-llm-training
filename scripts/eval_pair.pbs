@@ -1,0 +1,14 @@
+#!/bin/bash
+#PBS -N ascii-pair
+#PBS -A EVITA
+#PBS -q single-gpu
+#PBS -l select=1
+#PBS -l walltime=00:25:00
+#PBS -l filesystems=home:grand
+#PBS -o logs/pair.out
+#PBS -e logs/pair.err
+cd /grand/EVITA/eric-spencer/ascii-llm-training
+export HF_HOME=/grand/EVITA/eric-spencer/hf-cache
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+export PYTHONPATH=rlvr/_te_stub:.
+/grand/EVITA/eric-spencer/venvs/sophia-train/bin/python -m rlvr.eval_pair --device cuda

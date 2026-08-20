@@ -23,6 +23,48 @@ full detail behind the numbers below.
 
 ## Numbers
 
+### P3 verdict: GRPO shows no held-out effect (paired test, job 175888)
+
+Against the corrected cell-grid reward, the 600-step GRPO run produces a
+rising *training* curve (0.052 -> 0.092 across six 100-step windows, cell
+edge-F1 0.21 -> 0.55) and **no measurable improvement on held-out tasks**.
+
+Paired per-task comparison, base model vs trained adapter, same 40 held-out
+tasks, same constrained decoding:
+
+| | value |
+|---|---|
+| base mean | 0.1180 |
+| trained mean | 0.1177 |
+| trained wins / losses / ties | 20 / 19 / 1 |
+| exact sign test p | 1.00 |
+| luminance converter on the same tasks | 0.7969 |
+
+Twenty wins, nineteen losses. That is a coin flip. The earlier "+13%"
+(0.1096 vs 0.0969) came from two *separate* stochastic decoding runs rather
+than a paired comparison; sampling variance between runs is larger than the
+effect being claimed, and running the same models against each other on the
+same tasks makes the difference vanish.
+
+Every previously reported P3 gain is now superseded:
+
+| claim | measured against | status |
+|---|---|---|
+| reward 0.009 -> 0.040 over 600 steps | broken pixel reward | void |
+| held-out 2.4x base | broken pixel reward | void |
+| held-out +13% | corrected reward, unpaired | not reproducible when paired |
+
+What survives: **constrained decoding**, which delivers 100% format validity
+versus 0% unconstrained, reproduced on every run. That is a structural
+guarantee, not a learned one, and it does not need GRPO.
+
+Why the training curve can rise while held-out does not move: the reward the
+trainer sees is a group mean over 8 samples at temperature 1.0 on the 40
+*training* tasks, so it measures within-group ranking on seen tasks. Nothing
+in that curve promises transfer, and the paired test says there is none. A
+credible next attempt needs more tasks, more steps, and a paired held-out
+eval as the *stopping* criterion rather than a post-hoc check.
+
 ### The verifier was measuring the wrong thing (found and fixed 2026-08-19)
 
 Everything below this section was scored with a pixel-level reward

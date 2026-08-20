@@ -23,6 +23,78 @@ full detail behind the numbers below.
 
 ## Numbers
 
+### The verifier was measuring the wrong thing (found and fixed 2026-08-19)
+
+Everything below this section was scored with a pixel-level reward
+(`0.6*SSIM + 0.4*edge_F1` on the rasterized image). That reward is wrong, and
+the test that proves it is one line: on a filled circle, the `luminance`
+render -- which visibly *is* a filled circle, per-cell correlation +0.94 with
+the target -- scored **0.097**, while a sparse `structure` render correlating
++0.03 scored **0.302**. The verifier preferred the output that does not look
+like the picture, by 3x.
+
+Two mechanisms:
+
+1. **The SSIM term was dead.** After blank-normalization, `ssim_gain` was
+   0.000 for *every* candidate including the oracle: windowed SSIM on sparse
+   ink is dominated by empty windows, so a blank grid scores as well as a
+   perfect render (0.494 vs 0.493). 60% of the reward weight contributed
+   nothing and the effective ceiling was 0.4.
+2. **Pixel edge-F1 punishes correctness.** A correctly filled region
+   rasterizes to *glyph texture*, and every glyph boundary inside the fill
+   reads as an edge the smooth target does not have. Sparse scattered glyphs
+   sit only on the true boundary and score high. Random charset noise scored
+   0.87 on this term.
+
+Fix: score on the character cell grid, which is the resolution the medium
+actually has. `reward = 0.8 * coverage_corr + 0.2 * coverage_fidelity`, where
+`coverage_corr` is the Pearson correlation between per-cell ink coverage and
+per-cell target brightness, and `coverage_fidelity` pins the density.
+Degenerate output (blank, solid fill) has no variance and scores exactly 0 by
+construction rather than by special case. Cell edge-F1 is computed and
+reported but deliberately excluded from the reward: with any useful dilation
+tolerance it pays random noise 0.87.
+
+Discrimination after the fix (filled circle, 24x12):
+
+| candidate | reward |
+|---|---|
+| luminance render (looks right) | 0.935 |
+| edge render | 0.947 |
+| wrong shape (square) | 0.898 |
+| wrong shape (line) | 0.245 |
+| sparse structure render | 0.144 |
+| chars shuffled | 0.111 |
+| random noise | 0.094 |
+| blank / solid fill | 0.000 |
+
+Two bugs fell out while re-running the bench against it:
+
+- `anneal` carried its **own copy** of the reward formula, so it kept
+  optimizing the stale pixel metric and returned output scoring below its own
+  starting point. It now calls the same cell-level terms as `verify.score`.
+- `anneal` hardcoded a `mode="structure"` initialization, which is the worst
+  of the three modes under a metric that tracks likeness. It now starts from
+  whichever deterministic mode scores best on that image.
+
+Corrected bench (20 images, cols=40; previous values in parentheses):
+
+| method | reward |
+|---|---|
+| anneal (2000 steps) | **0.900** (0.238) |
+| luminance | 0.872 (0.066) |
+| edge | 0.517 (0.048) |
+| structure | 0.276 (0.217) |
+
+The ordering inverted. The original design's claim that structure-aware
+matching beats luminance mapping is **false** under a metric that tracks
+likeness -- structure mode under-inks badly, rendering filled regions and
+smooth gradients to near-blank, which is also why blank and oracle were
+indistinguishable to SSIM in the first place.
+
+**All P3 numbers below are therefore against the broken reward and do not
+carry over.** Job 175859 re-runs GRPO against the corrected verifier.
+
 ### P0/P1 -- converter + verifier + anneal (`results/bench.md`)
 
 20 synthetic images, cols=40, anneal_steps=2000. Mean reward (SSIM + edge term):

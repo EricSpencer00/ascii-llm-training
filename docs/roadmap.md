@@ -63,17 +63,23 @@ already available on Sophia).
 - Generation latency overhead from masking stays under 2x unconstrained
   decoding latency, measured on the same hardware.
 
-## P3 — RLVR / GRPO on a small open model, on Sophia — **scaffolded, running**
+## P3 — RLVR / GRPO on a small open model, on Sophia — **run, null result**
 
 `rlvr/{tasks,constrained,reward,train_grpo}.py` implement the task
 generator, constrained decoding, reward wrapper around
 `asciiart.verify.score`, and the GRPO training entry point
-(`python -m rlvr.train_grpo`). A short GRPO run (50 steps) is in progress on
-Sophia as of this writeup (PBS job 175612); see `results/summary.md` for the
-latest numbers and whether it has finished. Acceptance criteria (35/50
-images improved, no stratum regression, reward-hacking checks) are not yet
-evaluated — the run so far is a baseline-eval + short training smoke test,
-not the full acceptance run.
+(`python -m rlvr.train_grpo`). A 600-step run against the corrected
+cell-grid reward is done (PBS job 175888). Training reward rises; the
+held-out effect is zero. Base model vs trained adapter on the same held-out
+tasks, in the same loop, with the same decoding: 20 wins / 19 losses / 1
+tie, exact sign test p = 1.00. See `results/summary.md`.
+
+The acceptance criteria below are therefore **not met**. Two earlier gains
+were reported and both are withdrawn: one was measured against a broken
+pixel reward, the other against two separate stochastic decoding runs rather
+than a paired comparison. `python -m rlvr.train_grpo --eval-only` is paired
+by default now, and the GRPO run ends with the same function, so a
+base-vs-trained number cannot come from two runs again.
 
 Train against the P1 verifier as reward, using constrained decoding from P2
 so the policy never has to learn width/charset constraints itself and can

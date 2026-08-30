@@ -142,7 +142,8 @@ smooth gradients to near-blank, which is also why blank and oracle were
 indistinguishable to SSIM in the first place.
 
 **All P3 numbers below are therefore against the broken reward and do not
-carry over.** Job 175859 re-runs GRPO against the corrected verifier.
+carry over.** The re-run against the corrected verifier is done, and it is
+paired: see the P3 verdict at the top of this page (job 175888).
 
 ### P0/P1 -- converter + verifier + anneal (`results/bench.md`)
 
@@ -221,7 +222,11 @@ whether reward climbs via SSIM alone -- that would be the uniform-fill hack
 appearing, and is the first thing to check before believing any reward gain.
 
 
-### GRPO learns once the hack is closed (job 175665, 600 steps)
+### GRPO learns once the hack is closed (job 175665, 600 steps) -- superseded
+
+**Superseded.** The reward below is the broken pixel reward. The training
+curve it shows is real, but it does not transfer: the paired test at the top
+of this page finds no held-out effect.
 
 600 steps, Qwen2.5-0.5B-Instruct + LoRA, 24x12 grid, 8 generations, 40 tasks,
 2h04m on one GPU. Means over consecutive 100-step windows:
@@ -248,9 +253,17 @@ competitive method. The reward is training-time on the training tasks; run
 175665 set `save_strategy="no"` and saved no adapter, so there was no artifact
 to sample or to score on held-out tasks. Job **175759** repeats the run with
 the adapter persisted and a post-training eval on a disjoint task seed, which
-is the number that would actually support a claim.
+is the number that would actually support a claim. It did not: job 175759
+compared a trained mean against a base mean from a separate run, and pairing
+that comparison removed it.
 
-### Held-out eval with the trained adapter (job 175759)
+### Held-out eval with the trained adapter (job 175759) -- void
+
+**Void on two counts.** The reward is the broken pixel reward, and the
+comparison is unpaired: the base and trained numbers come from two separate
+stochastic decoding runs, so the ratio below measures run-to-run spread as
+much as it measures training. Job 175888 pairs the two arms and finds no
+effect. Kept for the record of how the claim was made.
 
 Repeat of the 600-step run with the LoRA adapter persisted and a
 post-training eval on 40 tasks generated from a disjoint seed:
@@ -260,8 +273,10 @@ post-training eval on 40 tasks generated from a disjoint seed:
 | base model, constrained (training seed) | 1.00 | 0.0117 | 0.206 |
 | trained adapter, constrained (held-out seed) | 1.00 | 0.0287 | 0.212 |
 
-The gain survives on tasks the policy never trained on: **2.4x the base
-model's reward**, at 14% of the deterministic converter's score. The training
+Read at the time as surviving on tasks the policy never trained on: **2.4x
+the base model's reward**, at 14% of the deterministic converter's score.
+The two rows are from different runs and different task seeds, so the ratio
+was never a comparison of one thing against another. The training
 curve reproduced the earlier run almost exactly (0.0092 -> 0.0400 across six
 100-step windows, edge 0.023 -> 0.100, SSIM 0.228 -> 0.165), so the effect is
 not a seed artifact.
@@ -280,10 +295,9 @@ BASE  reward=0.0068          TRAINED  reward=0.0266     ORACLE reward=0.2034
 Both models are mostly emitting charset-ordered filler rather than a shape.
 Training compacted the filler and roughly quadrupled the edge score, which is
 what the reward asked for, but the output is not recognizably a circle. The
-honest summary is that RLVR against this verifier produces a real, held-out,
-monotonic gain and a policy that is still nowhere near the converter it is
-being scored against. Closing that gap is a scale/steps question that 600
-steps on a 0.5B model does not answer.
+summary written at the time -- a real, held-out, monotonic gain from a policy
+still far below the converter -- holds only for the training curve. The
+held-out half of it does not survive pairing.
 
 ### The empty-grid reward hack (found 2026-08-19, fixed)
 

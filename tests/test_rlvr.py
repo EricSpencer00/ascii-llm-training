@@ -120,6 +120,40 @@ def test_paired_summary_flags_a_real_effect():
     assert s["sign_test_p"] < 0.01
 
 
+def test_paired_eval_uses_one_loop_over_the_same_tasks(monkeypatch):
+    """Both arms must be scored on the same tasks with the same decoding, in
+    one loop. Two arms sampled from two separate loops is the unpaired
+    comparison that gave the void "+13%" gain."""
+    from contextlib import contextmanager
+
+    from rlvr import train_grpo
+
+    tasks = generate_tasks(3, seed=0, cols=8, rows=4, charset=DEFAULT_ASCII_CHARSET)
+    active, seen = [], []
+
+    def make_arm(name):
+        @contextmanager
+        def ctx():
+            active.append(name)
+            try:
+                yield
+            finally:
+                active.pop()
+
+        return (name, None, ctx)
+
+    def fake_generate(model, tokenizer, prompt, cols, rows, charset, device, constrained):
+        seen.append((active[-1], prompt, cols, rows, constrained))
+        return "\n".join("." * cols for _ in range(rows))
+
+    monkeypatch.setattr(train_grpo, "_generate", fake_generate)
+    out = train_grpo._paired_eval([make_arm("base"), make_arm("trained")], None, tasks, "cpu")
+
+    by_arm = {a: [c[1:] for c in seen if c[0] == a] for a in ("base", "trained")}
+    assert by_arm["base"] == by_arm["trained"] and len(by_arm["base"]) == 3
+    assert out["summary"]["ties"] == 3
+
+
 # --- constrained decoding -------------------------------------------------
 
 transformers = pytest.importorskip("transformers")
@@ -226,3 +260,31 @@ def test_grid_processor_forces_eos_after_eos_token_seen(tiny_tokenizer):
     out = proc(input_ids, scores)
     finite_ids = set((out[0] > float("-inf")).nonzero().flatten().tolist())
     assert finite_ids == {tiny_tokenizer.eos_token_id}
+
+
+def test_lora_arms_select_different_weights():
+    """The base arm is the adapter disabled, so the two arms share every
+    weight except the adapter -- and an adapter that changes the output must
+    change it between them. If both arms ran the same weights the sign test
+    could never see an effect."""
+    peft = pytest.importorskip("peft")
+    import torch
+
+    from rlvr.train_grpo import _lora_arms
+
+    model = peft.get_peft_model(
+        transformers.AutoModelForCausalLM.from_pretrained("sshleifer/tiny-gpt2"),
+        peft.LoraConfig(r=4, lora_alpha=8, target_modules=["c_attn"], task_type="CAUSAL_LM"),
+    )
+    # lora_B starts at zero, which makes an untrained adapter the identity
+    for name, param in model.named_parameters():
+        if "lora_B" in name:
+            torch.nn.init.normal_(param, std=0.5)
+    model.eval()
+
+    ids = torch.tensor([[1, 2, 3]])
+    logits = {}
+    for arm, m, context in _lora_arms(model):
+        with context(), torch.no_grad():
+            logits[arm] = m(ids).logits
+    assert not torch.allclose(logits["base"], logits["trained"])

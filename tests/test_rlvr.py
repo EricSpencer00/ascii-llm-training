@@ -72,6 +72,54 @@ def test_completion_text_normalizes_chat_format():
     assert _completion_text([{"role": "assistant", "content": "hi"}]) == "hi"
 
 
+# --- paired held-out eval ------------------------------------------------
+
+
+def _pair_rows(pairs):
+    return [
+        {
+            "task_id": str(i),
+            "base": b,
+            "trained": t,
+            "base_format_ok": 1.0,
+            "trained_format_ok": 1.0,
+            "oracle": 0.8,
+        }
+        for i, (b, t) in enumerate(pairs)
+    ]
+
+
+def test_sign_test_coin_flip_and_sweep():
+    from rlvr.train_grpo import _sign_test
+
+    assert _sign_test(0, 0) == 1.0
+    assert _sign_test(20, 19) == pytest.approx(1.0)
+    assert _sign_test(10, 0) == pytest.approx(2 / 1024)
+
+
+def test_paired_summary_counts_wins_losses_ties():
+    from rlvr.train_grpo import _paired_summary
+
+    rows = _pair_rows([(0.1, 0.2), (0.3, 0.1), (0.5, 0.5)])
+    s = _paired_summary(rows)
+    assert (s["trained_wins"], s["trained_losses"], s["ties"]) == (1, 1, 1)
+    assert s["n_tasks"] == 3
+    assert s["base_mean"] == pytest.approx(0.3)
+    assert s["trained_mean"] == pytest.approx(0.8 / 3)
+    assert s["oracle_mean"] == pytest.approx(0.8)
+    assert s["sign_test_p"] == pytest.approx(1.0)
+
+
+def test_paired_summary_flags_a_real_effect():
+    """A one-sided sweep must come out significant, or the test has no power
+    to detect the effect it is there to detect."""
+    from rlvr.train_grpo import _paired_summary
+
+    s = _paired_summary(_pair_rows([(0.1, 0.2)] * 10))
+    assert s["trained_wins"] == 10 and s["trained_losses"] == 0
+    assert s["sign_test_p"] < 0.01
+
+
 # --- constrained decoding -------------------------------------------------
 
 transformers = pytest.importorskip("transformers")

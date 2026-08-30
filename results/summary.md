@@ -15,9 +15,9 @@ full detail behind the numbers below.
 | Constrained decoding (logit masking) | `rlvr/constrained.py` | done-baseline (P2) |
 | Synthetic RLVR tasks | `rlvr/tasks.py` | done |
 | GRPO reward wrapper | `rlvr/reward.py` | done |
-| GRPO training entry point | `rlvr/train_grpo.py` | scaffolded, short run in progress on Sophia (P3) |
+| GRPO training entry point | `rlvr/train_grpo.py` | scaffolded, 600-step run done on Sophia (P3); `--eval-only` is a paired base-vs-adapter held-out eval |
 | `transformer_engine` import-shadow stub | `rlvr/_te_stub/` | done (works around a broken `libtransformer_engine.so` vs. loaded `libcublasLt` on Sophia that crashes `import peft`) |
-| PBS job scripts | `scripts/{train_sophia.pbs,rlvr_sophia.pbs,run_baseline_sophia.sh}` | done |
+| PBS job scripts | `scripts/{train_sophia.pbs,rlvr_sophia.pbs,eval_pair.pbs,run_baseline_sophia.sh}` | done |
 | CI | `.github/workflows/ci.yml` | done -- runs `pytest tests/test_render.py tests/test_verify.py tests/test_anneal.py` on ubuntu-latest, does not run `test_pipeline.py` (needs `torch`+`pyfiglet`) or `test_rlvr.py` (needs `torch`+`transformers`) |
 | Legacy word-OCR pipeline, redesigned | `ascii_generator.py`, `data_prep.py`, `model.py`, `train.py`, `evaluate.py` | code done (2D grid positional embeddings + per-char cross-attention query heads); GPU validation run not yet completed as of this writeup |
 
@@ -45,6 +45,13 @@ Twenty wins, nineteen losses. That is a coin flip. The earlier "+13%"
 than a paired comparison; sampling variance between runs is larger than the
 effect being claimed, and running the same models against each other on the
 same tasks makes the difference vanish.
+
+The unpaired path is gone. `--eval-only` now runs the paired eval by
+default, the GRPO run ends with the same paired eval on the same held-out
+seed, and both go through one function (`rlvr.train_grpo._paired_eval`), so
+a base-vs-trained number can no longer come from two runs. The base-only
+constrained-decoding check keeps its own flag, `--eval-mode decoding`,
+because it compares decoding settings and not models.
 
 Every previously reported P3 gain is now superseded:
 

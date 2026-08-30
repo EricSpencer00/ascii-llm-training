@@ -5,13 +5,24 @@ verifier, on a small open model with LoRA, using constrained decoding
 Usage (see scripts/rlvr_sophia.pbs for the full sophia invocation):
 
     python -m rlvr.train_grpo --eval-only --cols 24 --rows 12
+    python -m rlvr.train_grpo --eval-only --eval-mode decoding --cols 24 --rows 12
     python -m rlvr.train_grpo --steps 50 --cols 24 --rows 12 --num-generations 8
 
-`--eval-only` samples completions with and without the constrained-decoding
-logits processor and reports format pass-rate + mean reward vs the
-`asciiart.render` oracle -- no training, no gradient step, no LoRA. This is
-the P2 acceptance check (0 constraint violations under constrained decoding)
-plus a first look at the base model's zero-shot reward gap.
+`--eval-only` runs a *paired* held-out eval: the base model and the trained
+adapter, on the same tasks, in the same loop, with the same constrained
+decoding, scored per task and compared with an exact sign test. Every
+model-vs-model number this repo reports comes from that one path.
+
+Pairing is the default because the unpaired version gave a wrong answer. The
+earlier "+13% held-out" gain (0.1096 vs 0.0969) came from two separate
+stochastic decoding runs. Run the same models on the same tasks and the
+difference disappears: 20 wins, 19 losses, 1 tie, sign test p = 1.00 (job
+175888). Sampling variance between runs is larger than the claimed effect.
+
+`--eval-mode decoding` is the one eval that does not compare two models: it
+samples the base model with and without the constrained-decoding logits
+processor and reports format pass-rate. That is the P2 acceptance check (0
+constraint violations under constrained decoding) and it needs no adapter.
 """
 
 from __future__ import annotations
@@ -21,6 +32,7 @@ import json
 import os
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from rlvr.tasks import DEFAULT_ASCII_CHARSET, generate_tasks
@@ -95,31 +107,131 @@ def _generate(model, tokenizer, prompt, cols, rows, charset, device, constrained
     return tokenizer.decode(completion_ids, skip_special_tokens=True)
 
 
-def _eval_tasks(model, tokenizer, tasks, device, constrained=True) -> dict:
-    """Score a model on `tasks` and return {format_pass_rate, mean_reward,
-    oracle_mean_reward}. Shared by the pre-training baseline eval and the
-    post-training held-out eval so both numbers are computed identically."""
-    model.eval()
-    rewards, oks, oracle = [], [], []
-    for t in tasks:
-        text = _generate(model, tokenizer, t.prompt, t.cols, t.rows, t.charset, device, constrained)
-        r = score_one(text, t.image, t.cols, t.rows, t.charset)
-        rewards.append(r["reward"])
-        oks.append(1.0 if r["constraints"]["ok"] else 0.0)
-        oracle.append(score_one(t.oracle_text(), t.image, t.cols, t.rows, t.charset)["reward"])
-    model.train()
-    n = max(1, len(tasks))
+def _sign_test(wins, losses) -> float:
+    """Two-sided exact sign test on paired wins/losses."""
+    from math import comb
+
+    k, m = min(wins, losses), wins + losses
+    if not m:
+        return 1.0
+    return min(1.0, 2 * sum(comb(m, i) for i in range(k + 1)) / (2 ** m))
+
+
+def _paired_summary(per_task, arms=("base", "trained")) -> dict:
+    """Aggregate the per-task rows of a paired eval into means, format
+    pass-rates, wins/losses/ties and an exact sign test. Pure function, so
+    the statistics are testable without a model."""
+    base, trained = arms
+    n = len(per_task)
+    wins = sum(1 for r in per_task if r[trained] > r[base])
+    losses = sum(1 for r in per_task if r[trained] < r[base])
+    mean = lambda key: (sum(r[key] for r in per_task) / n) if n else 0.0
     return {
-        "n_tasks": len(tasks),
-        "constrained": constrained,
-        "format_pass_rate": sum(oks) / n,
-        "mean_reward": sum(rewards) / n,
-        "oracle_mean_reward": sum(oracle) / n,
+        "n_tasks": n,
+        f"{base}_mean": mean(base),
+        f"{trained}_mean": mean(trained),
+        "oracle_mean": mean("oracle"),
+        f"{base}_format_pass_rate": mean(f"{base}_format_ok"),
+        f"{trained}_format_pass_rate": mean(f"{trained}_format_ok"),
+        f"{trained}_wins": wins,
+        f"{trained}_losses": losses,
+        "ties": n - wins - losses,
+        "sign_test_p": _sign_test(wins, losses),
     }
 
 
+def _paired_eval(arms, tokenizer, tasks, device, constrained=True) -> dict:
+    """Score every arm on the same tasks, in the same loop, with the same
+    decoding, and return per-task rewards plus a paired sign test.
+
+    `arms` is a list of (name, model, context) where `context` is a no-arg
+    context manager factory that selects that arm on the model -- for a
+    LoRA policy the base arm is `peft_model.disable_adapter`, so the two
+    arms share every weight except the adapter and nothing else can drift
+    between them.
+
+    Two means from two separate runs are not a comparison: decoding is
+    stochastic and the between-run spread is larger than the effect. Only
+    the paired numbers below are reportable.
+    """
+    per_task = []
+    for t in tasks:
+        rec = {"task_id": t.task_id, "description": t.description}
+        for name, model, context in arms:
+            with context():
+                text = _generate(
+                    model, tokenizer, t.prompt, t.cols, t.rows, t.charset, device, constrained
+                )
+            r = score_one(text, t.image, t.cols, t.rows, t.charset)
+            rec[name] = r["reward"]
+            rec[f"{name}_format_ok"] = 1.0 if r["constraints"]["ok"] else 0.0
+        rec["oracle"] = score_one(t.oracle_text(), t.image, t.cols, t.rows, t.charset)["reward"]
+        per_task.append(rec)
+
+    summary = _paired_summary(per_task, arms=[a[0] for a in arms])
+    summary["constrained"] = constrained
+    return {"summary": summary, "per_task": per_task}
+
+
+def _lora_arms(model):
+    """The two arms of a paired eval on a LoRA policy: adapter off, adapter
+    on. Same weights, same tokenizer, same decoding."""
+    return [("base", model, model.disable_adapter), ("trained", model, nullcontext)]
+
+
+def _heldout_tasks(args):
+    """The held-out task set: the training seed offset by `--heldout-offset`,
+    so `--eval-only` scores exactly the tasks the post-training eval scores."""
+    return generate_tasks(
+        args.n_tasks,
+        seed=args.seed + args.heldout_offset,
+        cols=args.cols,
+        rows=args.rows,
+        charset=args.charset,
+    )
+
+
 def run_eval(args):
-    import torch
+    """Paired held-out eval of the base model against the trained adapter.
+    Default for `--eval-only`; see the module docstring for why."""
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    adapter = args.adapter or str(Path(args.output_dir) / "adapter")
+    if not Path(adapter).exists():
+        sys.exit(
+            f"paired eval needs a trained adapter, none found at {adapter}. "
+            "Pass --adapter, or run --eval-mode decoding for the base-only "
+            "constrained-decoding check."
+        )
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = PeftModel.from_pretrained(
+        AutoModelForCausalLM.from_pretrained(args.model), adapter
+    ).to(args.device)
+    model.eval()
+
+    tasks = _heldout_tasks(args)
+    out = _paired_eval(_lora_arms(model), tokenizer, tasks, args.device)
+    out["summary"].update(
+        {"model": args.model, "adapter": adapter, "heldout_seed": args.seed + args.heldout_offset}
+    )
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"pair_{int(time.time())}.json"
+    log_path.write_text(json.dumps(out, indent=2))
+
+    print(json.dumps(out["summary"], indent=2))
+    print(f"log: {log_path}")
+    return out["summary"]
+
+
+def run_decoding_check(args):
+    """P2 acceptance check: the base model sampled with and without the grid
+    constraint processor, format pass-rate for each. One model, so there is
+    nothing to pair -- for base vs trained use the default paired eval."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     device = args.device
@@ -313,19 +425,21 @@ def run_train(args):
     trainer.model.save_pretrained(str(adapter_dir))
     print(f"adapter saved: {adapter_dir}")
 
-    eval_tasks = generate_tasks(
-        args.n_tasks,
-        seed=args.seed + 10_000,  # disjoint from the training tasks
-        cols=args.cols,
-        rows=args.rows,
-        charset=args.charset,
+    # Paired held-out eval, base vs trained, in one loop on one task set.
+    # A trained-only mean here was the source of the void "+13%" claim: it
+    # had to be compared against a base number from a separate run, and that
+    # comparison did not survive pairing (job 175888, p = 1.00).
+    eval_tasks = _heldout_tasks(args)  # disjoint from the training tasks
+    model = trainer.model
+    model.eval()
+    post = _paired_eval(
+        _lora_arms(model), trainer.processing_class, eval_tasks, args.device
     )
-    post = _eval_tasks(
-        trainer.model, trainer.processing_class, eval_tasks, args.device, constrained=True
-    )
+    model.train()
+    post["summary"]["heldout_seed"] = args.seed + args.heldout_offset
     post_path = LOG_DIR / f"posteval_{int(time.time())}.json"
     post_path.write_text(json.dumps(post, indent=2))
-    print("post-training held-out eval:", json.dumps(post))
+    print("post-training paired held-out eval:", json.dumps(post["summary"]))
     print(f"training log: {log_path}")
 
 
@@ -343,6 +457,26 @@ def main():
     p.add_argument("--output-dir", default=str(Path(__file__).parent / "checkpoints"))
     p.add_argument("--eval-only", action="store_true")
     p.add_argument(
+        "--eval-mode",
+        choices=("paired", "decoding"),
+        default="paired",
+        help="paired: base vs trained adapter on the same held-out tasks with the "
+        "same decoding (default; the only reportable model-vs-model comparison). "
+        "decoding: base model with and without constrained decoding (P2 check).",
+    )
+    p.add_argument(
+        "--adapter",
+        default=None,
+        help="adapter for the trained arm of the paired eval (default: <output-dir>/adapter)",
+    )
+    p.add_argument(
+        "--heldout-offset",
+        type=int,
+        default=10_000,
+        help="held-out task seed = --seed + this; the same offset the post-training "
+        "eval uses, so --eval-only scores the same tasks",
+    )
+    p.add_argument(
         "--constrained-rollout",
         action="store_true",
         default=True,
@@ -352,7 +486,9 @@ def main():
     p.add_argument("--no-constrained-rollout", dest="constrained_rollout", action="store_false")
     args = p.parse_args()
 
-    if args.eval_only:
+    if args.eval_only and args.eval_mode == "decoding":
+        run_decoding_check(args)
+    elif args.eval_only:
         run_eval(args)
     else:
         run_train(args)

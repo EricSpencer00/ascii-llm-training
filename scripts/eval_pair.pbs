@@ -7,8 +7,14 @@
 #PBS -l filesystems=home:grand
 #PBS -o logs/pair.out
 #PBS -e logs/pair.err
+
+# Paired held-out eval, base vs trained adapter: same 40 tasks (train seed 0
+# offset by 10000), same constrained decoding, per-task rewards, exact sign
+# test. This is the only reportable base-vs-trained comparison; two means
+# from two separate stochastic runs are not one.
 cd /grand/EVITA/eric-spencer/ascii-llm-training
 export HF_HOME=/grand/EVITA/eric-spencer/hf-cache
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export PYTHONPATH=rlvr/_te_stub:.
-/grand/EVITA/eric-spencer/venvs/sophia-train/bin/python -m rlvr.eval_pair --device cuda
+/grand/EVITA/eric-spencer/venvs/sophia-train/bin/python -m rlvr.train_grpo \
+  --eval-only --seed 0 --n-tasks 40 --cols 24 --rows 12 --device cuda

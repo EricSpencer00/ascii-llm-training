@@ -40,7 +40,7 @@ rlvr/                constrained decoding + GRPO/RLVR training on Sophia (P2/P3)
   constrained.py      GridConstraintLogitsProcessor (row length / charset / EOS)
   tasks.py             synthetic prompt/target-image task generator
   reward.py            TRL GRPOTrainer reward function wrapping asciiart.verify.score
-  train_grpo.py         python -m rlvr.train_grpo (--eval-only or full GRPO run)
+  train_grpo.py         python -m rlvr.train_grpo (--eval-only paired eval, or full GRPO run)
   _te_stub/            stub that shadows a broken transformer_engine import on Sophia
 scripts/             ALCF Sophia PBS job scripts (run_baseline_sophia.sh,
   train_sophia.pbs, rlvr_sophia.pbs)
@@ -80,15 +80,28 @@ been run, with numbers and reproduction commands.
 verifier as reward, using `Qwen/Qwen2.5-0.5B-Instruct` on ALCF Sophia:
 
 ```bash
+# paired held-out eval: base vs trained adapter, same tasks, same decoding
 python -m rlvr.train_grpo --eval-only --model Qwen/Qwen2.5-0.5B-Instruct \
-    --cols 24 --rows 12 --n-tasks 20 --device cuda
+    --cols 24 --rows 12 --n-tasks 40 --device cuda
+
+# P2 acceptance check: base model with and without constrained decoding
+python -m rlvr.train_grpo --eval-only --eval-mode decoding \
+    --model Qwen/Qwen2.5-0.5B-Instruct --cols 24 --rows 12 --n-tasks 20 --device cuda
 
 python -m rlvr.train_grpo --model Qwen/Qwen2.5-0.5B-Instruct \
     --cols 24 --rows 12 --steps 50 --num-generations 8 --n-tasks 20 --device cuda
 ```
 
-See `scripts/rlvr_sophia.pbs` for the full PBS job and `results/summary.md`
-for the latest baseline/GRPO numbers.
+`--eval-only` is paired by default: it scores the base model and the trained
+adapter on the same held-out tasks, in the same loop, with the same
+constrained decoding, and reports per-task wins/losses plus an exact sign
+test. Two means from two separate runs are not a comparison -- that is how
+the void "+13%" claim was produced. The GRPO run ends with the same paired
+eval, so every base-vs-trained number comes from one code path.
+
+See `scripts/rlvr_sophia.pbs` for the full PBS job, `scripts/eval_pair.pbs`
+for a standalone paired eval, and `results/summary.md` for the latest
+baseline/GRPO numbers.
 
 ## Legacy word-OCR pipeline
 

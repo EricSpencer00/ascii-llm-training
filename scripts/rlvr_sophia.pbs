@@ -8,9 +8,11 @@
 #PBS -o /grand/EVITA/eric-spencer/ascii-llm-training/logs/rlvr.out
 #PBS -e /grand/EVITA/eric-spencer/ascii-llm-training/logs/rlvr.err
 
-# P2/P3 acceptance run: baseline eval (format pass-rate with/without
-# constrained decoding, mean reward vs the deterministic converter oracle)
-# followed by a short GRPO run against the asciiart.verify reward.
+# P2/P3 acceptance run: the P2 decoding check (format pass-rate with and
+# without constrained decoding) followed by a GRPO run against the
+# asciiart.verify reward. The GRPO step ends with a paired held-out eval,
+# base vs trained adapter on the same tasks with the same decoding -- that
+# paired number is the only base-vs-trained result this job produces.
 set -e
 cd /grand/EVITA/eric-spencer/ascii-llm-training
 mkdir -p logs rlvr/logs rlvr/checkpoints
@@ -32,11 +34,11 @@ ROWS=12
 echo "== Ensuring pyfiglet/pillow present =="
 $PY -m pip install --quiet pyfiglet pillow || true
 
-echo "== Baseline eval: constrained vs unconstrained decoding =="
-$PY -m rlvr.train_grpo --eval-only --model "$MODEL" --cols $COLS --rows $ROWS \
-    --n-tasks 20 --device cuda
+echo "== P2 decoding check: constrained vs unconstrained =="
+$PY -m rlvr.train_grpo --eval-only --eval-mode decoding --model "$MODEL" \
+    --cols $COLS --rows $ROWS --n-tasks 20 --device cuda
 
-echo "== Short GRPO run =="
+echo "== GRPO run, ends with a paired held-out eval =="
 $PY -m rlvr.train_grpo --model "$MODEL" --cols $COLS --rows $ROWS \
     --steps 600 --num-generations 8 --n-tasks 40 --device cuda
 

@@ -22,5 +22,32 @@ jobs:
       - name: Install package, test extra, and a monospace TTF
         run: python -m pip install -e ".[test]" matplotlib
 
+      # The torch-dependent suites run in the test-torch job below.
       - name: Run tests
         run: pytest -q tests/test_render.py tests/test_verify.py tests/test_anneal.py
+
+  # test_pipeline.py and test_rlvr.py need torch, and test_rlvr also needs
+  # transformers and peft. They run in a separate job so the fast suite above
+  # is not blocked by a multi-minute install.
+  test-torch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The CPU wheel index avoids the default PyPI torch, which pulls about
+      # 2 GB of CUDA libraries that a hosted runner never uses.
+      - name: Install CPU torch
+        run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      # matplotlib supplies the monospace TTF, as in the job above.
+      # transformers and peft download sshleifer/tiny-gpt2 at test time.
+      - name: Install package, test extra, and the torch-suite deps
+        run: python -m pip install -e ".[test]" matplotlib pyfiglet tqdm transformers peft
+
+      - name: Run torch-dependent tests
+        run: pytest -q tests/test_pipeline.py tests/test_rlvr.py

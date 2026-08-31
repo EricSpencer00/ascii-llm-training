@@ -125,11 +125,15 @@ repo and a general interest in ASCII as a discrete grid representation.
 
 ### Quick start
 
+`data/` and `npz/` hold generated artifacts. They are gitignored. Step 1 and
+step 2 rebuild them from scratch. The seed is fixed, so the same command
+always writes the same bytes.
+
 ```bash
 # 1. Generate data (adjust --num-samples as desired)
-python ascii_generator.py --num-samples 5000 --out-dir data
+python ascii_generator.py --num-samples 10000 --out-dir data --seed 42
 
-# 2. Prepare dataset
+# 2. Prepare dataset (also writes npz/vocabs.json)
 python data_prep.py --data-file data/dataset.jsonl --out npz/art_dataset.npz
 
 # 3. Train model

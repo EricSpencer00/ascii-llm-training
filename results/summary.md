@@ -19,7 +19,7 @@ full detail behind the numbers below.
 | `transformer_engine` import-shadow stub | `rlvr/_te_stub/` | done (works around a broken `libtransformer_engine.so` vs. loaded `libcublasLt` on Sophia that crashes `import peft`) |
 | PBS job scripts | `scripts/{train_sophia.pbs,rlvr_sophia.pbs,eval_pair.pbs,run_baseline_sophia.sh}` | done |
 | CI | `.github/workflows/ci.yml` | done -- runs `pytest tests/test_render.py tests/test_verify.py tests/test_anneal.py` on ubuntu-latest, does not run `test_pipeline.py` (needs `torch`+`pyfiglet`) or `test_rlvr.py` (needs `torch`+`transformers`) |
-| Legacy word-OCR pipeline, redesigned | `ascii_generator.py`, `data_prep.py`, `model.py`, `train.py`, `evaluate.py` | code done (2D grid positional embeddings + per-char cross-attention query heads); GPU validation run not yet completed as of this writeup |
+| Legacy word-OCR pipeline, redesigned | `ascii_generator.py`, `data_prep.py`, `model.py`, `train.py`, `evaluate.py` | done -- 2D grid positional embeddings + per-char cross-attention query heads; GPU validation run 175613 gives per_char_acc 0.819 / exact_acc 0.545 |
 
 ## Numbers
 
@@ -330,18 +330,6 @@ Bench numbers after the fix (previous values in parentheses):
 Ordering is unchanged; every method loses the free SSIM floor it was being
 paid before.
 
-### Open issues
-
-- `render(mode="structure")` renders a smooth 0->255 gradient as an
-  **all-blank grid**. The per-cell glyph match is dominated by gradient
-  structure, so a smooth cell picks space regardless of its brightness. This
-  made `test_score_perfect_self_match` vacuous (it asserted a high score on
-  blank-vs-blank); the test now uses a circle. The converter behavior itself
-  is unfixed.
-- The SSIM term contributes almost nothing on these synthetic targets; the
-  reward is effectively edge-F1 with an SSIM tiebreaker. A perceptual metric
-  better suited to sparse ink would be the real fix.
-
 ### Legacy word-OCR baseline (before redesign)
 
 Job 175601, 10k samples, 15 epochs, d_model=192 (`results/legacy_ocr.md`):
@@ -387,11 +375,20 @@ qsub scripts/train_sophia.pbs
 
 Local `pytest -q`: with `PYTHONPATH=.`, excluding `tests/test_pipeline.py`
 (needs `pyfiglet`, not installed in this checkout's `.venv` and `.venv` has
-no `pip` to add it) -- 34 passed, 0 failed. `tests/test_rlvr.py` needs
+no `pip` to add it) -- 41 passed, 0 failed. `tests/test_rlvr.py` needs
 `torch`/`transformers`, both present in `.venv`, and passes as part of that run.
 
 ## Open issues
 
+- `render(mode="structure")` renders a smooth 0->255 gradient as an
+  **all-blank grid**. The per-cell glyph match is dominated by gradient
+  structure, so a smooth cell picks space regardless of its brightness. This
+  made `test_score_perfect_self_match` vacuous (it asserted a high score on
+  blank-vs-blank); the test now uses a circle. The converter behavior itself
+  is unfixed.
+- The SSIM term contributes almost nothing on these synthetic targets; the
+  reward is effectively edge-F1 with an SSIM tiebreaker. A perceptual metric
+  better suited to sparse ink would be the real fix.
 - `eval_1787114710.jsonl` on sophia shows an all-zero constrained result
   that contradicts the constrained-decoding guarantee (100% valid rows by
   construction) -- looks like a broken first attempt superseded by
@@ -403,14 +400,8 @@ no `pip` to add it) -- 34 passed, 0 failed. `tests/test_rlvr.py` needs
   image-count criteria (40/50, 45/50) have not been checked.
 - P3 acceptance criteria (35/50 images improved over base model,
   no-stratum-regression check, reward-hacking checks from `docs/design.md`)
-  have not been run -- only a baseline eval and a short 50-step GRPO smoke
-  run are in flight.
-- Legacy-OCR redesign has unit-test coverage but no completed GPU training
-  run showing per_char_acc/exact_acc above the 0.122/0.002 baseline; job
-  175613 is intended to produce that number.
+  have not been run. The paired test that has been run is 40 tasks, not the
+  50-image evaluation set, and it finds no held-out effect to stratify.
 - `tests/test_pipeline.py` cannot run in this checkout's `.venv` (no `pip`
   available to install `pyfiglet`); CI installs it separately and is not
   affected.
-- CLI `--help` at the top level (`python -m asciiart.cli --help`) previously
-  fell through to the `render` subparser's help instead of listing
-  `render`/`verify`/`anneal`; fixed in `asciiart/cli.py`.

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from model import AsciiTransformer
-from config import PAD_TOKEN
+from config import PAD_TOKEN, RANDOM_SEED
 
 
 def load_checkpoint(path):
@@ -22,6 +22,7 @@ def main():
     ap.add_argument('--checkpoint', type=str, required=True)
     ap.add_argument('--samples', type=int, default=5, help='print N random samples')
     ap.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+    ap.add_argument('--seed', type=int, default=RANDOM_SEED, help='seed for the evaluation subset')
     args = ap.parse_args()
 
     d = np.load(args.data, allow_pickle=True)
@@ -45,9 +46,8 @@ def main():
     model.eval()
 
     # Evaluate overall accuracy
-    import random
-    idxs = np.arange(len(X))
-    random.shuffle(idxs)
+    rng = np.random.default_rng(args.seed)
+    idxs = rng.permutation(len(X))
     subset = idxs[:min(1000, len(idxs))]
 
     correct_chars = 0

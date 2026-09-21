@@ -28,6 +28,7 @@ constraint violations under constrained decoding) and it needs no adapter.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -39,6 +40,35 @@ from rlvr.tasks import DEFAULT_ASCII_CHARSET, generate_tasks
 from rlvr.reward import format_reward, reward_fn, score_one
 
 LOG_DIR = Path(__file__).parent / "logs"
+
+
+def _task_generation_seed(base_seed: int, task_id: str) -> int:
+    """Derive a stable per-task seed for common-random-number evals.
+
+    A paired comparison should differ only in model weights, not in the
+    random sample drawn at each task. Hashing the task id instead of using the
+    loop index keeps the stream attached to the task if the eval set is
+    reordered, while the explicit base seed makes the whole comparison
+    reproducible from the CLI.
+    """
+    digest = hashlib.blake2b(
+        f"{base_seed}:{task_id}".encode("utf-8"), digest_size=8
+    ).digest()
+    # torch.manual_seed accepts signed 64-bit seeds; keep the derived value in
+    # that range on every supported torch version.
+    return int.from_bytes(digest, "big") & ((1 << 63) - 1)
+
+
+def _fork_rng_devices(torch):
+    """Return every CUDA device whose state ``torch.manual_seed`` can touch.
+
+    ``torch.manual_seed`` seeds all visible CUDA devices, even when the model
+    is on CPU or a single selected GPU. Snapshot all of them so common-random
+    evaluation cannot perturb a later operation on another device.
+    """
+    if torch.cuda.is_available():
+        return list(range(torch.cuda.device_count()))
+    return []
 
 
 def build_dataset(tasks):
@@ -58,7 +88,18 @@ def build_dataset(tasks):
     return Dataset.from_list(rows)
 
 
-def _generate(model, tokenizer, prompt, cols, rows, charset, device, constrained, max_new_tokens=None):
+def _generate(
+    model,
+    tokenizer,
+    prompt,
+    cols,
+    rows,
+    charset,
+    device,
+    constrained,
+    max_new_tokens=None,
+    generation_seed=None,
+):
     import torch
     from transformers import LogitsProcessorList
 
@@ -94,15 +135,25 @@ def _generate(model, tokenizer, prompt, cols, rows, charset, device, constrained
             )
         )
 
-    with torch.no_grad():
-        out = model.generate(
-            input_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=1.0,
-            logits_processor=processors,
-            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-        )
+    def sample():
+        with torch.no_grad():
+            return model.generate(
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=1.0,
+                logits_processor=processors,
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            )
+
+    if generation_seed is None:
+        out = sample()
+    else:
+        # Save and restore the caller's RNG state so evaluating one arm cannot
+        # change the random stream seen by the next task or by later training.
+        with torch.random.fork_rng(devices=_fork_rng_devices(torch)):
+            torch.manual_seed(int(generation_seed))
+            out = sample()
     completion_ids = out[0, prompt_len:]
     return tokenizer.decode(completion_ids, skip_special_tokens=True)
 
@@ -140,7 +191,9 @@ def _paired_summary(per_task, arms=("base", "trained")) -> dict:
     }
 
 
-def _paired_eval(arms, tokenizer, tasks, device, constrained=True) -> dict:
+def _paired_eval(
+    arms, tokenizer, tasks, device, constrained=True, generation_seed=0
+) -> dict:
     """Score every arm on the same tasks, in the same loop, with the same
     decoding, and return per-task rewards plus a paired sign test.
 
@@ -151,16 +204,30 @@ def _paired_eval(arms, tokenizer, tasks, device, constrained=True) -> dict:
     between them.
 
     Two means from two separate runs are not a comparison: decoding is
-    stochastic and the between-run spread is larger than the effect. Only
-    the paired numbers below are reportable.
+    stochastic and the between-run spread is larger than the effect. Each arm
+    therefore receives the same stable per-task random seed (a common-random-
+    numbers control), and only the paired numbers below are reportable.
     """
     per_task = []
     for t in tasks:
-        rec = {"task_id": t.task_id, "description": t.description}
+        task_seed = _task_generation_seed(generation_seed, t.task_id)
+        rec = {
+            "task_id": t.task_id,
+            "description": t.description,
+            "generation_seed": task_seed,
+        }
         for name, model, context in arms:
             with context():
                 text = _generate(
-                    model, tokenizer, t.prompt, t.cols, t.rows, t.charset, device, constrained
+                    model,
+                    tokenizer,
+                    t.prompt,
+                    t.cols,
+                    t.rows,
+                    t.charset,
+                    device,
+                    constrained,
+                    generation_seed=task_seed,
                 )
             r = score_one(text, t.image, t.cols, t.rows, t.charset)
             rec[name] = r["reward"]
@@ -169,7 +236,7 @@ def _paired_eval(arms, tokenizer, tasks, device, constrained=True) -> dict:
         per_task.append(rec)
 
     summary = _paired_summary(per_task, arms=[a[0] for a in arms])
-    summary["constrained"] = constrained
+    summary.update({"constrained": constrained, "generation_seed": generation_seed})
     return {"summary": summary, "per_task": per_task}
 
 
@@ -214,9 +281,20 @@ def run_eval(args):
     model.eval()
 
     tasks = _heldout_tasks(args)
-    out = _paired_eval(_lora_arms(model), tokenizer, tasks, args.device)
+    out = _paired_eval(
+        _lora_arms(model),
+        tokenizer,
+        tasks,
+        args.device,
+        generation_seed=args.generation_seed,
+    )
     out["summary"].update(
-        {"model": args.model, "adapter": adapter, "heldout_seed": args.seed + args.heldout_offset}
+        {
+            "model": args.model,
+            "adapter": adapter,
+            "heldout_seed": args.seed + args.heldout_offset,
+            "task_seed": args.seed + args.heldout_offset,
+        }
     )
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -249,12 +327,23 @@ def run_decoding_check(args):
     for constrained in (True, False):
         for t in tasks:
             text = _generate(
-                model, tokenizer, t.prompt, t.cols, t.rows, t.charset, device, constrained
+                model,
+                tokenizer,
+                t.prompt,
+                t.cols,
+                t.rows,
+                t.charset,
+                device,
+                constrained,
+                generation_seed=_task_generation_seed(args.generation_seed, t.task_id),
             )
             r = score_one(text, t.image, t.cols, t.rows, t.charset)
             results["constrained" if constrained else "unconstrained"].append(
                 {
                     "task_id": t.task_id,
+                    "generation_seed": _task_generation_seed(
+                        args.generation_seed, t.task_id
+                    ),
                     "format_ok": r["constraints"]["ok"],
                     "reward": r["reward"],
                 }
@@ -273,11 +362,20 @@ def run_decoding_check(args):
         mean_reward = sum(r["reward"] for r in rows_) / n if n else 0.0
         summary[mode] = {"format_pass_rate": pass_rate, "mean_reward": mean_reward}
     summary["oracle_mean_reward"] = sum(oracle_rewards) / len(oracle_rewards) if oracle_rewards else 0.0
+    summary.update(
+        {
+            "model": args.model,
+            "task_seed": args.seed,
+            "generation_seed": args.generation_seed,
+        }
+    )
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"eval_{int(time.time())}.jsonl"
     with open(log_path, "w") as f:
-        f.write(json.dumps(summary) + "\n")
+        record = dict(summary)
+        record["per_task"] = results
+        f.write(json.dumps(record) + "\n")
 
     print(json.dumps(summary, indent=2))
     print(f"log: {log_path}")
@@ -433,10 +531,15 @@ def run_train(args):
     model = trainer.model
     model.eval()
     post = _paired_eval(
-        _lora_arms(model), trainer.processing_class, eval_tasks, args.device
+        _lora_arms(model),
+        trainer.processing_class,
+        eval_tasks,
+        args.device,
+        generation_seed=args.generation_seed,
     )
     model.train()
     post["summary"]["heldout_seed"] = args.seed + args.heldout_offset
+    post["summary"]["task_seed"] = args.seed + args.heldout_offset
     post_path = LOG_DIR / f"posteval_{int(time.time())}.json"
     post_path.write_text(json.dumps(post, indent=2))
     print("post-training paired held-out eval:", json.dumps(post["summary"]))
@@ -453,6 +556,13 @@ def main():
     p.add_argument("--num-generations", type=int, default=8)
     p.add_argument("--n-tasks", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--generation-seed",
+        type=int,
+        default=0,
+        help="base seed for common-random-number paired generation; each task "
+        "derives a stable stream from this value",
+    )
     p.add_argument("--device", default="cpu", help="cpu or cuda; pass --device cuda on GPU nodes")
     p.add_argument("--output-dir", default=str(Path(__file__).parent / "checkpoints"))
     p.add_argument("--eval-only", action="store_true")

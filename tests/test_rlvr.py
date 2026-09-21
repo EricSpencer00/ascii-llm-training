@@ -142,8 +142,18 @@ def test_paired_eval_uses_one_loop_over_the_same_tasks(monkeypatch):
 
         return (name, None, ctx)
 
-    def fake_generate(model, tokenizer, prompt, cols, rows, charset, device, constrained):
-        seen.append((active[-1], prompt, cols, rows, constrained))
+    def fake_generate(
+        model,
+        tokenizer,
+        prompt,
+        cols,
+        rows,
+        charset,
+        device,
+        constrained,
+        generation_seed=None,
+    ):
+        seen.append((active[-1], prompt, cols, rows, constrained, generation_seed))
         return "\n".join("." * cols for _ in range(rows))
 
     monkeypatch.setattr(train_grpo, "_generate", fake_generate)
@@ -152,6 +162,99 @@ def test_paired_eval_uses_one_loop_over_the_same_tasks(monkeypatch):
     by_arm = {a: [c[1:] for c in seen if c[0] == a] for a in ("base", "trained")}
     assert by_arm["base"] == by_arm["trained"] and len(by_arm["base"]) == 3
     assert out["summary"]["ties"] == 3
+
+
+def test_paired_eval_common_random_numbers_are_stable(monkeypatch):
+    from contextlib import nullcontext
+
+    from rlvr import train_grpo
+
+    tasks = generate_tasks(2, seed=7, cols=8, rows=4, charset=DEFAULT_ASCII_CHARSET)
+    calls = []
+
+    def fake_generate(
+        model,
+        tokenizer,
+        prompt,
+        cols,
+        rows,
+        charset,
+        device,
+        constrained,
+        generation_seed=None,
+    ):
+        calls.append((prompt, generation_seed))
+        return "\n".join("." * cols for _ in range(rows))
+
+    monkeypatch.setattr(train_grpo, "_generate", fake_generate)
+    arms = [("base", None, nullcontext), ("trained", None, nullcontext)]
+
+    first = train_grpo._paired_eval(
+        arms, None, tasks, "cpu", generation_seed=1234
+    )
+    first_calls = calls[:]
+    calls.clear()
+    second = train_grpo._paired_eval(
+        arms, None, tasks, "cpu", generation_seed=1234
+    )
+
+    assert first == second
+    assert first_calls == calls
+    assert first_calls[0][1] == first_calls[1][1]
+    assert first_calls[2][1] == first_calls[3][1]
+    assert first_calls[0][1] != first_calls[2][1]
+
+
+def test_generate_reuses_a_seed_without_leaking_rng_state():
+    import torch
+    from types import SimpleNamespace
+
+    from rlvr.train_grpo import _generate
+
+    class Tokenizer:
+        chat_template = None
+        pad_token_id = 0
+        eos_token_id = 1
+
+        def __call__(self, prompt, return_tensors):
+            return SimpleNamespace(input_ids=torch.tensor([[5]]))
+
+        def decode(self, ids, skip_special_tokens):
+            return str(int(ids[0]))
+
+    class Model:
+        def generate(self, input_ids, **kwargs):
+            token = torch.randint(2, 100, (1,))
+            return torch.cat([input_ids, token.unsqueeze(0)], dim=1)
+
+    torch.manual_seed(99)
+    expected_next = torch.random.get_rng_state()
+    expected_value = torch.randint(0, 100, (1,)).item()
+    torch.random.set_rng_state(expected_next)
+
+    first = _generate(Model(), Tokenizer(), "prompt", 1, 1, ".", "cpu", False, generation_seed=42)
+    second = _generate(Model(), Tokenizer(), "prompt", 1, 1, ".", "cpu", False, generation_seed=42)
+
+    assert first == second
+    assert torch.randint(0, 100, (1,)).item() == expected_value
+
+
+def test_fork_rng_devices_covers_all_visible_cuda_devices():
+    from rlvr.train_grpo import _fork_rng_devices
+
+    class Cuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def device_count():
+            return 3
+
+    class Torch:
+        cuda = Cuda()
+
+    assert _fork_rng_devices(Torch) == [0, 1, 2]
 
 
 # --- constrained decoding -------------------------------------------------

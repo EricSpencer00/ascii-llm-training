@@ -53,6 +53,12 @@ a base-vs-trained number can no longer come from two runs. The base-only
 constrained-decoding check keeps its own flag, `--eval-mode decoding`,
 because it compares decoding settings and not models.
 
+The evaluator now draws three independent, deterministically seeded decode
+replicates per task by default and averages them within each task before the
+sign test. Raw replicate rows are retained in the JSON artifact; pass
+`--generation-repeats 1` for the legacy single-draw comparison. The historical
+job 175888 numbers above remain a one-draw result and are not being rewritten.
+
 Every previously reported P3 gain is now superseded:
 
 | claim | measured against | status |

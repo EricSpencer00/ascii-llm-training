@@ -80,13 +80,14 @@ been run, with numbers and reproduction commands.
 verifier as reward, using `Qwen/Qwen2.5-0.5B-Instruct` on ALCF Sophia:
 
 ```bash
-# paired held-out eval: base vs trained adapter, same tasks, same decoding
+# paired held-out eval: base vs trained adapter, same tasks, three paired draws
 python -m rlvr.train_grpo --eval-only --model Qwen/Qwen2.5-0.5B-Instruct \
-    --cols 24 --rows 12 --n-tasks 40 --device cuda
+    --cols 24 --rows 12 --n-tasks 40 --generation-repeats 3 --device cuda
 
 # P2 acceptance check: base model with and without constrained decoding
 python -m rlvr.train_grpo --eval-only --eval-mode decoding \
-    --model Qwen/Qwen2.5-0.5B-Instruct --cols 24 --rows 12 --n-tasks 20 --device cuda
+    --model Qwen/Qwen2.5-0.5B-Instruct --cols 24 --rows 12 --n-tasks 20 \
+    --generation-repeats 3 --device cuda
 
 python -m rlvr.train_grpo --model Qwen/Qwen2.5-0.5B-Instruct \
     --cols 24 --rows 12 --steps 50 --num-generations 8 --n-tasks 20 --device cuda
@@ -95,9 +96,14 @@ python -m rlvr.train_grpo --model Qwen/Qwen2.5-0.5B-Instruct \
 `--eval-only` is paired by default: it scores the base model and the trained
 adapter on the same held-out tasks, in the same loop, with the same
 constrained decoding, and reports per-task wins/losses plus an exact sign
-test. Two means from two separate runs are not a comparison -- that is how
-the void "+13%" claim was produced. The GRPO run ends with the same paired
-eval, so every base-vs-trained number comes from one code path.
+test. Each task is sampled three times by default with independent,
+deterministically derived generation seeds. The raw replicate rows are saved,
+but rewards are averaged within each task before the sign test, so extra draws
+do not inflate the task denominator. Use `--generation-repeats 1` to reproduce
+the original single-draw evaluator. Two means from two separate runs are not
+a comparison -- that is how the void "+13%" claim was produced. The GRPO run
+ends with the same paired eval, so every base-vs-trained number comes from one
+code path.
 
 See `scripts/rlvr_sophia.pbs` for the full PBS job, `scripts/eval_pair.pbs`
 for a standalone paired eval, and `results/summary.md` for the latest

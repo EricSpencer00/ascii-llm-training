@@ -30,16 +30,19 @@ PY=/grand/EVITA/eric-spencer/venvs/sophia-train/bin/python
 MODEL=Qwen/Qwen2.5-0.5B-Instruct
 COLS=24
 ROWS=12
+GENERATION_REPEATS=3
 
 echo "== Ensuring pyfiglet/pillow present =="
 $PY -m pip install --quiet pyfiglet pillow || true
 
 echo "== P2 decoding check: constrained vs unconstrained =="
 $PY -m rlvr.train_grpo --eval-only --eval-mode decoding --model "$MODEL" \
-    --cols $COLS --rows $ROWS --n-tasks 20 --device cuda
+    --cols $COLS --rows $ROWS --n-tasks 20 \
+    --generation-repeats $GENERATION_REPEATS --device cuda
 
 echo "== GRPO run, ends with a paired held-out eval =="
 $PY -m rlvr.train_grpo --model "$MODEL" --cols $COLS --rows $ROWS \
-    --steps 600 --num-generations 8 --n-tasks 40 --device cuda
+    --steps 600 --num-generations 8 --n-tasks 40 \
+    --generation-repeats $GENERATION_REPEATS --device cuda
 
 echo "== Done =="

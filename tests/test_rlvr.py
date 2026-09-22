@@ -205,6 +205,124 @@ def test_paired_eval_common_random_numbers_are_stable(monkeypatch):
     assert first_calls[0][1] != first_calls[2][1]
 
 
+def test_task_generation_seed_keeps_legacy_stream_and_separates_replicates():
+    import hashlib
+
+    from rlvr.train_grpo import _task_generation_seed
+
+    expected = int.from_bytes(
+        hashlib.blake2b(b"123:task-1", digest_size=8).digest(), "big"
+    ) & ((1 << 63) - 1)
+    assert _task_generation_seed(123, "task-1") == expected
+    assert _task_generation_seed(123, "task-1", replicate=0) == expected
+    assert len(
+        {
+            _task_generation_seed(123, "task-1", replicate=i)
+            for i in range(3)
+        }
+    ) == 3
+    assert _task_generation_seed(123, "task-1", replicate=2) == _task_generation_seed(
+        123, "task-1", replicate=2
+    )
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _task_generation_seed(123, "task-1", replicate=-1)
+
+
+def test_paired_eval_replicates_are_paired_and_aggregate_by_task(monkeypatch):
+    from contextlib import contextmanager
+
+    from rlvr import train_grpo
+
+    tasks = generate_tasks(2, seed=7, cols=8, rows=4, charset=DEFAULT_ASCII_CHARSET)
+    active, calls, seed_index = [], [], {}
+
+    def make_arm(name):
+        @contextmanager
+        def ctx():
+            active.append(name)
+            try:
+                yield
+            finally:
+                active.pop()
+
+        return (name, None, ctx)
+
+    def fake_generate(
+        model,
+        tokenizer,
+        prompt,
+        cols,
+        rows,
+        charset,
+        device,
+        constrained,
+        generation_seed=None,
+    ):
+        seed_index.setdefault(generation_seed, len(seed_index))
+        calls.append((active[-1], prompt, generation_seed))
+        return f"generated|{active[-1]}|{generation_seed}"
+
+    def fake_score(text, image, cols, rows, charset):
+        if not text.startswith("generated|"):
+            reward = 10.0
+        else:
+            _, arm, raw_seed = text.split("|")
+            task_and_replicate = seed_index[int(raw_seed)]
+            task_index, replicate = divmod(task_and_replicate, 3)
+            reward = (task_index + 1) + replicate / 10
+            if arm == "trained":
+                reward += 0.2
+        return {"reward": reward, "constraints": {"ok": True}}
+
+    monkeypatch.setattr(train_grpo, "_generate", fake_generate)
+    monkeypatch.setattr(train_grpo, "score_one", fake_score)
+    arms = [make_arm("base"), make_arm("trained")]
+
+    first = train_grpo._paired_eval(
+        arms,
+        None,
+        tasks,
+        "cpu",
+        generation_seed=1234,
+        generation_repeats=3,
+    )
+    second = train_grpo._paired_eval(
+        arms,
+        None,
+        tasks,
+        "cpu",
+        generation_seed=1234,
+        generation_repeats=3,
+    )
+
+    assert first == second
+    assert len(calls) == 2 * 3 * 2 * 2
+    for task in tasks:
+        task_calls = [call for call in calls if call[1] == task.prompt]
+        assert [call[2] for call in task_calls[::2]] == [
+            call[2] for call in task_calls[1::2]
+        ]
+        assert len({call[2] for call in task_calls[::2]}) == 3
+
+    summary = first["summary"]
+    assert summary["n_tasks"] == 2
+    assert summary["n_replicates"] == 3
+    assert summary["n_generation_samples"] == 6
+    assert summary["base_mean"] == pytest.approx(1.6)
+    assert summary["trained_mean"] == pytest.approx(1.8)
+    assert (summary["trained_wins"], summary["trained_losses"]) == (2, 0)
+    # The sign test sees two task-level means, not six task x replicate rows.
+    assert summary["sign_test_p"] == pytest.approx(0.5)
+    assert [row["delta"] for row in summary["replicate_summaries"]] == pytest.approx(
+        [0.2, 0.2, 0.2]
+    )
+    assert all(len(task["replicates"]) == 3 for task in first["per_task"])
+
+    with pytest.raises(ValueError, match="at least 1"):
+        train_grpo._paired_eval(arms, None, tasks, "cpu", generation_repeats=0)
+
+
 def test_generate_reuses_a_seed_without_leaking_rng_state():
     import torch
     from types import SimpleNamespace

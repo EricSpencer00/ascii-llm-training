@@ -24,3 +24,8 @@ jobs:
 
       - name: Run tests
         run: pytest -q tests/test_render.py tests/test_verify.py tests/test_anneal.py
+
+      - name: Run CPU RLVR regression tests
+        # Seed and replicate regressions use CPU fakes; model integration tests
+        # skip individually when optional ML dependencies are absent.
+        run: pytest -q -rs tests/test_rlvr.py

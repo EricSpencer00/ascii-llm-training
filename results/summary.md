@@ -18,7 +18,7 @@ full detail behind the numbers below.
 | GRPO training entry point | `rlvr/train_grpo.py` | scaffolded, 600-step run done on Sophia (P3); `--eval-only` is a paired base-vs-adapter held-out eval |
 | `transformer_engine` import-shadow stub | `rlvr/_te_stub/` | done (works around a broken `libtransformer_engine.so` vs. loaded `libcublasLt` on Sophia that crashes `import peft`) |
 | PBS job scripts | `scripts/{train_sophia.pbs,rlvr_sophia.pbs,eval_pair.pbs,run_baseline_sophia.sh}` | done |
-| CI | `.github/workflows/ci.yml` | done -- runs `pytest tests/test_render.py tests/test_verify.py tests/test_anneal.py` on ubuntu-latest, does not run `test_pipeline.py` (needs `torch`+`pyfiglet`) or `test_rlvr.py` (needs `torch`+`transformers`) |
+| CI | `.github/workflows/ci.yml` | runs rendering, verifier, annealing, and deterministic CPU RLVR regressions on ubuntu-latest; optional RLVR model integration tests skip individually without ML dependencies, and `test_pipeline.py` remains outside this lightweight gate |
 | Legacy word-OCR pipeline, redesigned | `ascii_generator.py`, `data_prep.py`, `model.py`, `train.py`, `evaluate.py` | done -- 2D grid positional embeddings + per-char cross-attention query heads; GPU validation run 175613 gives per_char_acc 0.819 / exact_acc 0.545 |
 
 ## Numbers

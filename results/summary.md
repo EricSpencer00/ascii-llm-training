@@ -59,6 +59,10 @@ sign test. Raw replicate rows are retained in the JSON artifact; pass
 `--generation-repeats 1` for the legacy single-draw comparison. The historical
 job 175888 numbers above remain a one-draw result and are not being rewritten.
 
+CPU regressions validate the replicate bookkeeping. A real three-replicate
+GPU evaluation has not been performed; this evaluator remains research code,
+and the CPU checks do not establish a model improvement or P3 qualification.
+
 Every previously reported P3 gain is now superseded:
 
 | claim | measured against | status |

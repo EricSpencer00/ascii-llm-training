@@ -324,7 +324,8 @@ def test_paired_eval_replicates_are_paired_and_aggregate_by_task(monkeypatch):
 
 
 def test_generate_reuses_a_seed_without_leaking_rng_state():
-    import torch
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
     from types import SimpleNamespace
 
     from rlvr.train_grpo import _generate
@@ -377,14 +378,12 @@ def test_fork_rng_devices_covers_all_visible_cuda_devices():
 
 # --- constrained decoding -------------------------------------------------
 
-transformers = pytest.importorskip("transformers")
-
-
 @pytest.fixture(scope="module")
 def tiny_tokenizer():
-    from transformers import AutoTokenizer
+    # Keep optional model dependencies from skipping CPU-only eval regressions.
+    transformers = pytest.importorskip("transformers")
 
-    return AutoTokenizer.from_pretrained("sshleifer/tiny-gpt2")
+    return transformers.AutoTokenizer.from_pretrained("sshleifer/tiny-gpt2")
 
 
 def test_build_allowed_token_map_single_chars_only(tiny_tokenizer):
@@ -402,7 +401,7 @@ def test_build_allowed_token_map_single_chars_only(tiny_tokenizer):
 
 
 def test_grid_processor_forces_newline_at_row_end(tiny_tokenizer):
-    import torch
+    torch = pytest.importorskip("torch")
 
     from rlvr.constrained import GridConstraintLogitsProcessor
 
@@ -434,7 +433,7 @@ def test_grid_processor_forces_eos_at_end_of_last_row(tiny_tokenizer):
     the last row's column count is reached, matching
     asciiart.verify.check_constraints (which expects exactly `rows` lines,
     not `rows` lines plus one trailing empty line)."""
-    import torch
+    torch = pytest.importorskip("torch")
 
     from rlvr.constrained import GridConstraintLogitsProcessor
 
@@ -459,7 +458,7 @@ def test_grid_processor_forces_eos_at_end_of_last_row(tiny_tokenizer):
 
 
 def test_grid_processor_forces_eos_after_eos_token_seen(tiny_tokenizer):
-    import torch
+    torch = pytest.importorskip("torch")
 
     from rlvr.constrained import GridConstraintLogitsProcessor
 
@@ -488,8 +487,9 @@ def test_lora_arms_select_different_weights():
     weight except the adapter -- and an adapter that changes the output must
     change it between them. If both arms ran the same weights the sign test
     could never see an effect."""
+    transformers = pytest.importorskip("transformers")
     peft = pytest.importorskip("peft")
-    import torch
+    torch = pytest.importorskip("torch")
 
     from rlvr.train_grpo import _lora_arms
 

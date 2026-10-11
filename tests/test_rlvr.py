@@ -325,6 +325,7 @@ def test_paired_eval_replicates_are_paired_and_aggregate_by_task(monkeypatch):
 
 def test_generate_reuses_a_seed_without_leaking_rng_state():
     torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
     from types import SimpleNamespace
 
     from rlvr.train_grpo import _generate

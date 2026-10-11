@@ -5,28 +5,85 @@ verifier, on a small open model with LoRA, using constrained decoding
 Usage (see scripts/rlvr_sophia.pbs for the full sophia invocation):
 
     python -m rlvr.train_grpo --eval-only --cols 24 --rows 12
+    python -m rlvr.train_grpo --eval-only --eval-mode decoding --cols 24 --rows 12
     python -m rlvr.train_grpo --steps 50 --cols 24 --rows 12 --num-generations 8
 
-`--eval-only` samples completions with and without the constrained-decoding
-logits processor and reports format pass-rate + mean reward vs the
-`asciiart.render` oracle -- no training, no gradient step, no LoRA. This is
-the P2 acceptance check (0 constraint violations under constrained decoding)
-plus a first look at the base model's zero-shot reward gap.
+`--eval-only` runs a *paired* held-out eval: the base model and the trained
+adapter, on the same tasks, in the same loop, with the same constrained
+decoding, scored across three independent draws per task by default, and
+compared with an exact sign test over task-level means. Every model-vs-model
+number this repo reports comes from that one path.
+
+Pairing is the default because the unpaired version gave a wrong answer. The
+earlier "+13% held-out" gain (0.1096 vs 0.0969) came from two separate
+stochastic decoding runs. Run the same models on the same tasks and the
+difference disappears: 20 wins, 19 losses, 1 tie, sign test p = 1.00 (job
+175888). Sampling variance between runs is larger than the claimed effect.
+
+`--eval-mode decoding` is the one eval that does not compare two models: it
+samples the base model with and without the constrained-decoding logits
+processor and reports format pass-rate. That is the P2 acceptance check (0
+constraint violations under constrained decoding) and it needs no adapter.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from rlvr.tasks import DEFAULT_ASCII_CHARSET, generate_tasks
 from rlvr.reward import format_reward, reward_fn, score_one
 
 LOG_DIR = Path(__file__).parent / "logs"
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _task_generation_seed(base_seed: int, task_id: str, replicate: int = 0) -> int:
+    """Derive a stable per-task-and-replicate seed for evals.
+
+    A paired comparison should differ only in model weights, not in the
+    random sample drawn at each task. Hashing the task id instead of using the
+    loop index keeps the stream attached to the task if the eval set is
+    reordered, while the explicit base seed makes the whole comparison
+    reproducible from the CLI. Replicate zero intentionally retains the seed
+    format used by the original common-random-number evaluator; later
+    replicates are independent streams for the same task.
+    """
+    if replicate < 0:
+        raise ValueError("replicate must be non-negative")
+    task_key = f"{base_seed}:{task_id}"
+    if replicate:
+        task_key += f":replicate:{replicate}"
+    digest = hashlib.blake2b(
+        task_key.encode("utf-8"), digest_size=8
+    ).digest()
+    # torch.manual_seed accepts signed 64-bit seeds; keep the derived value in
+    # that range on every supported torch version.
+    return int.from_bytes(digest, "big") & ((1 << 63) - 1)
+
+
+def _fork_rng_devices(torch):
+    """Return every CUDA device whose state ``torch.manual_seed`` can touch.
+
+    ``torch.manual_seed`` seeds all visible CUDA devices, even when the model
+    is on CPU or a single selected GPU. Snapshot all of them so common-random
+    evaluation cannot perturb a later operation on another device.
+    """
+    if torch.cuda.is_available():
+        return list(range(torch.cuda.device_count()))
+    return []
 
 
 def build_dataset(tasks):
@@ -46,7 +103,18 @@ def build_dataset(tasks):
     return Dataset.from_list(rows)
 
 
-def _generate(model, tokenizer, prompt, cols, rows, charset, device, constrained, max_new_tokens=None):
+def _generate(
+    model,
+    tokenizer,
+    prompt,
+    cols,
+    rows,
+    charset,
+    device,
+    constrained,
+    max_new_tokens=None,
+    generation_seed=None,
+):
     import torch
     from transformers import LogitsProcessorList
 
@@ -82,44 +150,250 @@ def _generate(model, tokenizer, prompt, cols, rows, charset, device, constrained
             )
         )
 
-    with torch.no_grad():
-        out = model.generate(
-            input_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=1.0,
-            logits_processor=processors,
-            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-        )
+    def sample():
+        with torch.no_grad():
+            return model.generate(
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=1.0,
+                logits_processor=processors,
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            )
+
+    if generation_seed is None:
+        out = sample()
+    else:
+        # Save and restore the caller's RNG state so evaluating one arm cannot
+        # change the random stream seen by the next task or by later training.
+        with torch.random.fork_rng(devices=_fork_rng_devices(torch)):
+            torch.manual_seed(int(generation_seed))
+            out = sample()
     completion_ids = out[0, prompt_len:]
     return tokenizer.decode(completion_ids, skip_special_tokens=True)
 
 
-def _eval_tasks(model, tokenizer, tasks, device, constrained=True) -> dict:
-    """Score a model on `tasks` and return {format_pass_rate, mean_reward,
-    oracle_mean_reward}. Shared by the pre-training baseline eval and the
-    post-training held-out eval so both numbers are computed identically."""
-    model.eval()
-    rewards, oks, oracle = [], [], []
-    for t in tasks:
-        text = _generate(model, tokenizer, t.prompt, t.cols, t.rows, t.charset, device, constrained)
-        r = score_one(text, t.image, t.cols, t.rows, t.charset)
-        rewards.append(r["reward"])
-        oks.append(1.0 if r["constraints"]["ok"] else 0.0)
-        oracle.append(score_one(t.oracle_text(), t.image, t.cols, t.rows, t.charset)["reward"])
-    model.train()
-    n = max(1, len(tasks))
+def _sign_test(wins, losses) -> float:
+    """Two-sided exact sign test on paired wins/losses."""
+    from math import comb
+
+    k, m = min(wins, losses), wins + losses
+    if not m:
+        return 1.0
+    return min(1.0, 2 * sum(comb(m, i) for i in range(k + 1)) / (2 ** m))
+
+
+def _paired_summary(per_task, arms=("base", "trained")) -> dict:
+    """Aggregate the per-task rows of a paired eval into means, format
+    pass-rates, wins/losses/ties and an exact sign test. Pure function, so
+    the statistics are testable without a model."""
+    base, trained = arms
+    n = len(per_task)
+    wins = sum(1 for r in per_task if r[trained] > r[base])
+    losses = sum(1 for r in per_task if r[trained] < r[base])
+    mean = lambda key: (sum(r[key] for r in per_task) / n) if n else 0.0
     return {
-        "n_tasks": len(tasks),
-        "constrained": constrained,
-        "format_pass_rate": sum(oks) / n,
-        "mean_reward": sum(rewards) / n,
-        "oracle_mean_reward": sum(oracle) / n,
+        "n_tasks": n,
+        f"{base}_mean": mean(base),
+        f"{trained}_mean": mean(trained),
+        "oracle_mean": mean("oracle"),
+        f"{base}_format_pass_rate": mean(f"{base}_format_ok"),
+        f"{trained}_format_pass_rate": mean(f"{trained}_format_ok"),
+        f"{trained}_wins": wins,
+        f"{trained}_losses": losses,
+        "ties": n - wins - losses,
+        "sign_test_p": _sign_test(wins, losses),
     }
 
 
+def _paired_eval(
+    arms,
+    tokenizer,
+    tasks,
+    device,
+    constrained=True,
+    generation_seed=0,
+    generation_repeats=1,
+) -> dict:
+    """Score every arm on the same tasks, in the same loop, with the same
+    decoding, and return per-task rewards plus a paired sign test.
+
+    `arms` is a list of (name, model, context) where `context` is a no-arg
+    context manager factory that selects that arm on the model -- for a
+    LoRA policy the base arm is `peft_model.disable_adapter`, so the two
+    arms share every weight except the adapter and nothing else can drift
+    between them.
+
+    Two means from two separate runs are not a comparison: decoding is
+    stochastic and the between-run spread is larger than the effect. Each arm
+    therefore receives the same stable per-task-and-replicate random seed (a
+    common-random-numbers control). Replicates are averaged within each task
+    before the sign test, so independent draws measure sampling stability
+    without pretending that one task is multiple independent tasks.
+    """
+    if generation_repeats < 1:
+        raise ValueError("generation_repeats must be at least 1")
+
+    arm_names = [a[0] for a in arms]
+    per_task = []
+    for t in tasks:
+        oracle_reward = score_one(
+            t.oracle_text(), t.image, t.cols, t.rows, t.charset
+        )["reward"]
+        replicate_rows = []
+        generation_seeds = []
+        for replicate in range(generation_repeats):
+            task_seed = _task_generation_seed(
+                generation_seed, t.task_id, replicate=replicate
+            )
+            generation_seeds.append(task_seed)
+            replicate_row = {
+                "replicate": replicate,
+                "generation_seed": task_seed,
+            }
+            for name, model, context in arms:
+                with context():
+                    text = _generate(
+                        model,
+                        tokenizer,
+                        t.prompt,
+                        t.cols,
+                        t.rows,
+                        t.charset,
+                        device,
+                        constrained,
+                        generation_seed=task_seed,
+                    )
+                r = score_one(text, t.image, t.cols, t.rows, t.charset)
+                replicate_row[name] = r["reward"]
+                replicate_row[f"{name}_format_ok"] = (
+                    1.0 if r["constraints"]["ok"] else 0.0
+                )
+            replicate_row["oracle"] = oracle_reward
+            replicate_rows.append(replicate_row)
+
+        rec = {
+            "task_id": t.task_id,
+            "description": t.description,
+            # Keep the original field for consumers of single-replicate logs;
+            # the complete seed matrix is recorded alongside the raw rows.
+            "generation_seed": generation_seeds[0],
+            "generation_seeds": generation_seeds,
+            "replicates": replicate_rows,
+        }
+        for name in arm_names:
+            rec[name] = sum(row[name] for row in replicate_rows) / generation_repeats
+            rec[f"{name}_format_ok"] = (
+                sum(row[f"{name}_format_ok"] for row in replicate_rows)
+                / generation_repeats
+            )
+        rec["oracle"] = oracle_reward
+        per_task.append(rec)
+
+    summary = _paired_summary(per_task, arms=arm_names)
+    replicate_summaries = []
+    if len(arm_names) >= 2:
+        base_name, trained_name = arm_names[:2]
+        for replicate in range(generation_repeats):
+            rows = [task["replicates"][replicate] for task in per_task]
+            n = len(rows)
+            base_mean = sum(row[base_name] for row in rows) / n if n else 0.0
+            trained_mean = (
+                sum(row[trained_name] for row in rows) / n if n else 0.0
+            )
+            replicate_summaries.append(
+                {
+                    "replicate": replicate,
+                    f"{base_name}_mean": base_mean,
+                    f"{trained_name}_mean": trained_mean,
+                    "delta": trained_mean - base_mean,
+                }
+            )
+    summary.update(
+        {
+            "constrained": constrained,
+            "generation_seed": generation_seed,
+            "generation_repeats": generation_repeats,
+            "n_replicates": generation_repeats,
+            "n_generation_samples": len(tasks) * generation_repeats,
+            "replicate_summaries": replicate_summaries,
+        }
+    )
+    return {"summary": summary, "per_task": per_task}
+
+
+def _lora_arms(model):
+    """The two arms of a paired eval on a LoRA policy: adapter off, adapter
+    on. Same weights, same tokenizer, same decoding."""
+    return [("base", model, model.disable_adapter), ("trained", model, nullcontext)]
+
+
+def _heldout_tasks(args):
+    """The held-out task set: the training seed offset by `--heldout-offset`,
+    so `--eval-only` scores exactly the tasks the post-training eval scores."""
+    return generate_tasks(
+        args.n_tasks,
+        seed=args.seed + args.heldout_offset,
+        cols=args.cols,
+        rows=args.rows,
+        charset=args.charset,
+    )
+
+
 def run_eval(args):
-    import torch
+    """Paired held-out eval of the base model against the trained adapter.
+    Default for `--eval-only`; see the module docstring for why."""
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    adapter = args.adapter or str(Path(args.output_dir) / "adapter")
+    if not Path(adapter).exists():
+        sys.exit(
+            f"paired eval needs a trained adapter, none found at {adapter}. "
+            "Pass --adapter, or run --eval-mode decoding for the base-only "
+            "constrained-decoding check."
+        )
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = PeftModel.from_pretrained(
+        AutoModelForCausalLM.from_pretrained(args.model), adapter
+    ).to(args.device)
+    model.eval()
+
+    tasks = _heldout_tasks(args)
+    out = _paired_eval(
+        _lora_arms(model),
+        tokenizer,
+        tasks,
+        args.device,
+        generation_seed=args.generation_seed,
+        generation_repeats=args.generation_repeats,
+    )
+    out["summary"].update(
+        {
+            "model": args.model,
+            "adapter": adapter,
+            "heldout_seed": args.seed + args.heldout_offset,
+            "task_seed": args.seed + args.heldout_offset,
+        }
+    )
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"pair_{int(time.time())}.json"
+    log_path.write_text(json.dumps(out, indent=2))
+
+    print(json.dumps(out["summary"], indent=2))
+    print(f"log: {log_path}")
+    return out["summary"]
+
+
+def run_decoding_check(args):
+    """P2 acceptance check: the base model sampled with and without the grid
+    constraint processor, format pass-rate for each, across the configured
+    decode replicates. One model, so there is nothing to pair -- for base vs
+    trained use the default paired eval."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     device = args.device
@@ -135,18 +409,33 @@ def run_eval(args):
 
     results = {"constrained": [], "unconstrained": []}
     for constrained in (True, False):
+        mode = "constrained" if constrained else "unconstrained"
         for t in tasks:
-            text = _generate(
-                model, tokenizer, t.prompt, t.cols, t.rows, t.charset, device, constrained
-            )
-            r = score_one(text, t.image, t.cols, t.rows, t.charset)
-            results["constrained" if constrained else "unconstrained"].append(
-                {
-                    "task_id": t.task_id,
-                    "format_ok": r["constraints"]["ok"],
-                    "reward": r["reward"],
-                }
-            )
+            for replicate in range(args.generation_repeats):
+                task_seed = _task_generation_seed(
+                    args.generation_seed, t.task_id, replicate=replicate
+                )
+                text = _generate(
+                    model,
+                    tokenizer,
+                    t.prompt,
+                    t.cols,
+                    t.rows,
+                    t.charset,
+                    device,
+                    constrained,
+                    generation_seed=task_seed,
+                )
+                r = score_one(text, t.image, t.cols, t.rows, t.charset)
+                results[mode].append(
+                    {
+                        "task_id": t.task_id,
+                        "replicate": replicate,
+                        "generation_seed": task_seed,
+                        "format_ok": r["constraints"]["ok"],
+                        "reward": r["reward"],
+                    }
+                )
 
     oracle_rewards = []
     for t in tasks:
@@ -160,12 +449,25 @@ def run_eval(args):
         pass_rate = sum(1 for r in rows_ if r["format_ok"]) / n if n else 0.0
         mean_reward = sum(r["reward"] for r in rows_) / n if n else 0.0
         summary[mode] = {"format_pass_rate": pass_rate, "mean_reward": mean_reward}
-    summary["oracle_mean_reward"] = sum(oracle_rewards) / len(oracle_rewards) if oracle_rewards else 0.0
+    summary["oracle_mean_reward"] = (
+        sum(oracle_rewards) / len(oracle_rewards) if oracle_rewards else 0.0
+    )
+    summary.update(
+        {
+            "model": args.model,
+            "task_seed": args.seed,
+            "generation_seed": args.generation_seed,
+            "generation_repeats": args.generation_repeats,
+            "n_generation_samples": len(tasks) * args.generation_repeats,
+        }
+    )
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"eval_{int(time.time())}.jsonl"
     with open(log_path, "w") as f:
-        f.write(json.dumps(summary) + "\n")
+        record = dict(summary)
+        record["per_task"] = results
+        f.write(json.dumps(record) + "\n")
 
     print(json.dumps(summary, indent=2))
     print(f"log: {log_path}")
@@ -313,19 +615,27 @@ def run_train(args):
     trainer.model.save_pretrained(str(adapter_dir))
     print(f"adapter saved: {adapter_dir}")
 
-    eval_tasks = generate_tasks(
-        args.n_tasks,
-        seed=args.seed + 10_000,  # disjoint from the training tasks
-        cols=args.cols,
-        rows=args.rows,
-        charset=args.charset,
+    # Paired held-out eval, base vs trained, in one loop on one task set.
+    # A trained-only mean here was the source of the void "+13%" claim: it
+    # had to be compared against a base number from a separate run, and that
+    # comparison did not survive pairing (job 175888, p = 1.00).
+    eval_tasks = _heldout_tasks(args)  # disjoint from the training tasks
+    model = trainer.model
+    model.eval()
+    post = _paired_eval(
+        _lora_arms(model),
+        trainer.processing_class,
+        eval_tasks,
+        args.device,
+        generation_seed=args.generation_seed,
+        generation_repeats=args.generation_repeats,
     )
-    post = _eval_tasks(
-        trainer.model, trainer.processing_class, eval_tasks, args.device, constrained=True
-    )
+    model.train()
+    post["summary"]["heldout_seed"] = args.seed + args.heldout_offset
+    post["summary"]["task_seed"] = args.seed + args.heldout_offset
     post_path = LOG_DIR / f"posteval_{int(time.time())}.json"
     post_path.write_text(json.dumps(post, indent=2))
-    print("post-training held-out eval:", json.dumps(post))
+    print("post-training paired held-out eval:", json.dumps(post["summary"]))
     print(f"training log: {log_path}")
 
 
@@ -339,9 +649,44 @@ def main():
     p.add_argument("--num-generations", type=int, default=8)
     p.add_argument("--n-tasks", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--generation-seed",
+        type=int,
+        default=0,
+        help="base seed for common-random-number paired generation; each task "
+        "derives a stable stream from this value",
+    )
+    p.add_argument(
+        "--generation-repeats",
+        type=_positive_int,
+        default=3,
+        help="independent paired decode samples per task for evaluation; "
+        "replicate 0 retains the original seed stream (use 1 for the legacy "
+        "single-draw evaluation)",
+    )
     p.add_argument("--device", default="cpu", help="cpu or cuda; pass --device cuda on GPU nodes")
     p.add_argument("--output-dir", default=str(Path(__file__).parent / "checkpoints"))
     p.add_argument("--eval-only", action="store_true")
+    p.add_argument(
+        "--eval-mode",
+        choices=("paired", "decoding"),
+        default="paired",
+        help="paired: base vs trained adapter on the same held-out tasks with the "
+        "same decoding (default; the only reportable model-vs-model comparison). "
+        "decoding: base model with and without constrained decoding (P2 check).",
+    )
+    p.add_argument(
+        "--adapter",
+        default=None,
+        help="adapter for the trained arm of the paired eval (default: <output-dir>/adapter)",
+    )
+    p.add_argument(
+        "--heldout-offset",
+        type=int,
+        default=10_000,
+        help="held-out task seed = --seed + this; the same offset the post-training "
+        "eval uses, so --eval-only scores the same tasks",
+    )
     p.add_argument(
         "--constrained-rollout",
         action="store_true",
@@ -352,7 +697,9 @@ def main():
     p.add_argument("--no-constrained-rollout", dest="constrained_rollout", action="store_false")
     args = p.parse_args()
 
-    if args.eval_only:
+    if args.eval_only and args.eval_mode == "decoding":
+        run_decoding_check(args)
+    elif args.eval_only:
         run_eval(args)
     else:
         run_train(args)

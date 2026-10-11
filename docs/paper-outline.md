@@ -1,8 +1,9 @@
 # Paper outline
 
 Status: draft outline only. Numbers are deliberately omitted -- every claim
-below must be filled from `results/` at write-up time, and several are still
-pending (the GRPO re-run against the corrected verifier).
+below must be filled from `results/` at write-up time. The GRPO re-run
+against the corrected verifier is done and it is a null result; item 7 below
+records what it replaced.
 
 ## What this repo actually establishes
 
@@ -34,9 +35,12 @@ Ordered by how well the evidence supports the claim, strongest first.
    verifier whose hard predicates are checked only post-hoc produced
    identically-zero reward and zero gradient -- a null result that looks like
    "RL does not work here" and is actually a plumbing bug.
-7. **RLVR against the renderer produces a real held-out gain** -- and stays
-   far below the deterministic converter it is scored against. (Pending
-   re-measurement against the corrected verifier.)
+7. **RLVR against the renderer produces no measurable held-out gain.** The
+   training reward rises and none of it transfers: base vs trained adapter on
+   the same held-out tasks, same decoding, is 20 wins / 19 losses / 1 tie,
+   sign test p = 1.00. The earlier "+13%" came from two separate stochastic
+   decoding runs, so it measured between-run spread. State this as a null
+   result with the paired test as the evidence; do not claim a gain.
 
 ## Framing options
 

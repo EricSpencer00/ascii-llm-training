@@ -72,16 +72,318 @@ def test_completion_text_normalizes_chat_format():
     assert _completion_text([{"role": "assistant", "content": "hi"}]) == "hi"
 
 
+# --- paired held-out eval ------------------------------------------------
+
+
+def _pair_rows(pairs):
+    return [
+        {
+            "task_id": str(i),
+            "base": b,
+            "trained": t,
+            "base_format_ok": 1.0,
+            "trained_format_ok": 1.0,
+            "oracle": 0.8,
+        }
+        for i, (b, t) in enumerate(pairs)
+    ]
+
+
+def test_sign_test_coin_flip_and_sweep():
+    from rlvr.train_grpo import _sign_test
+
+    assert _sign_test(0, 0) == 1.0
+    assert _sign_test(20, 19) == pytest.approx(1.0)
+    assert _sign_test(10, 0) == pytest.approx(2 / 1024)
+
+
+def test_paired_summary_counts_wins_losses_ties():
+    from rlvr.train_grpo import _paired_summary
+
+    rows = _pair_rows([(0.1, 0.2), (0.3, 0.1), (0.5, 0.5)])
+    s = _paired_summary(rows)
+    assert (s["trained_wins"], s["trained_losses"], s["ties"]) == (1, 1, 1)
+    assert s["n_tasks"] == 3
+    assert s["base_mean"] == pytest.approx(0.3)
+    assert s["trained_mean"] == pytest.approx(0.8 / 3)
+    assert s["oracle_mean"] == pytest.approx(0.8)
+    assert s["sign_test_p"] == pytest.approx(1.0)
+
+
+def test_paired_summary_flags_a_real_effect():
+    """A one-sided sweep must come out significant, or the test has no power
+    to detect the effect it is there to detect."""
+    from rlvr.train_grpo import _paired_summary
+
+    s = _paired_summary(_pair_rows([(0.1, 0.2)] * 10))
+    assert s["trained_wins"] == 10 and s["trained_losses"] == 0
+    assert s["sign_test_p"] < 0.01
+
+
+def test_paired_eval_uses_one_loop_over_the_same_tasks(monkeypatch):
+    """Both arms must be scored on the same tasks with the same decoding, in
+    one loop. Two arms sampled from two separate loops is the unpaired
+    comparison that gave the void "+13%" gain."""
+    from contextlib import contextmanager
+
+    from rlvr import train_grpo
+
+    tasks = generate_tasks(3, seed=0, cols=8, rows=4, charset=DEFAULT_ASCII_CHARSET)
+    active, seen = [], []
+
+    def make_arm(name):
+        @contextmanager
+        def ctx():
+            active.append(name)
+            try:
+                yield
+            finally:
+                active.pop()
+
+        return (name, None, ctx)
+
+    def fake_generate(
+        model,
+        tokenizer,
+        prompt,
+        cols,
+        rows,
+        charset,
+        device,
+        constrained,
+        generation_seed=None,
+    ):
+        seen.append((active[-1], prompt, cols, rows, constrained, generation_seed))
+        return "\n".join("." * cols for _ in range(rows))
+
+    monkeypatch.setattr(train_grpo, "_generate", fake_generate)
+    out = train_grpo._paired_eval([make_arm("base"), make_arm("trained")], None, tasks, "cpu")
+
+    by_arm = {a: [c[1:] for c in seen if c[0] == a] for a in ("base", "trained")}
+    assert by_arm["base"] == by_arm["trained"] and len(by_arm["base"]) == 3
+    assert out["summary"]["ties"] == 3
+
+
+def test_paired_eval_common_random_numbers_are_stable(monkeypatch):
+    from contextlib import nullcontext
+
+    from rlvr import train_grpo
+
+    tasks = generate_tasks(2, seed=7, cols=8, rows=4, charset=DEFAULT_ASCII_CHARSET)
+    calls = []
+
+    def fake_generate(
+        model,
+        tokenizer,
+        prompt,
+        cols,
+        rows,
+        charset,
+        device,
+        constrained,
+        generation_seed=None,
+    ):
+        calls.append((prompt, generation_seed))
+        return "\n".join("." * cols for _ in range(rows))
+
+    monkeypatch.setattr(train_grpo, "_generate", fake_generate)
+    arms = [("base", None, nullcontext), ("trained", None, nullcontext)]
+
+    first = train_grpo._paired_eval(
+        arms, None, tasks, "cpu", generation_seed=1234
+    )
+    first_calls = calls[:]
+    calls.clear()
+    second = train_grpo._paired_eval(
+        arms, None, tasks, "cpu", generation_seed=1234
+    )
+
+    assert first == second
+    assert first_calls == calls
+    assert first_calls[0][1] == first_calls[1][1]
+    assert first_calls[2][1] == first_calls[3][1]
+    assert first_calls[0][1] != first_calls[2][1]
+
+
+def test_task_generation_seed_keeps_legacy_stream_and_separates_replicates():
+    import hashlib
+
+    from rlvr.train_grpo import _task_generation_seed
+
+    expected = int.from_bytes(
+        hashlib.blake2b(b"123:task-1", digest_size=8).digest(), "big"
+    ) & ((1 << 63) - 1)
+    assert _task_generation_seed(123, "task-1") == expected
+    assert _task_generation_seed(123, "task-1", replicate=0) == expected
+    assert len(
+        {
+            _task_generation_seed(123, "task-1", replicate=i)
+            for i in range(3)
+        }
+    ) == 3
+    assert _task_generation_seed(123, "task-1", replicate=2) == _task_generation_seed(
+        123, "task-1", replicate=2
+    )
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _task_generation_seed(123, "task-1", replicate=-1)
+
+
+def test_paired_eval_replicates_are_paired_and_aggregate_by_task(monkeypatch):
+    from contextlib import contextmanager
+
+    from rlvr import train_grpo
+
+    tasks = generate_tasks(2, seed=7, cols=8, rows=4, charset=DEFAULT_ASCII_CHARSET)
+    active, calls, seed_index = [], [], {}
+
+    def make_arm(name):
+        @contextmanager
+        def ctx():
+            active.append(name)
+            try:
+                yield
+            finally:
+                active.pop()
+
+        return (name, None, ctx)
+
+    def fake_generate(
+        model,
+        tokenizer,
+        prompt,
+        cols,
+        rows,
+        charset,
+        device,
+        constrained,
+        generation_seed=None,
+    ):
+        seed_index.setdefault(generation_seed, len(seed_index))
+        calls.append((active[-1], prompt, generation_seed))
+        return f"generated|{active[-1]}|{generation_seed}"
+
+    def fake_score(text, image, cols, rows, charset):
+        if not text.startswith("generated|"):
+            reward = 10.0
+        else:
+            _, arm, raw_seed = text.split("|")
+            task_and_replicate = seed_index[int(raw_seed)]
+            task_index, replicate = divmod(task_and_replicate, 3)
+            reward = (task_index + 1) + replicate / 10
+            if arm == "trained":
+                reward += 0.2
+        return {"reward": reward, "constraints": {"ok": True}}
+
+    monkeypatch.setattr(train_grpo, "_generate", fake_generate)
+    monkeypatch.setattr(train_grpo, "score_one", fake_score)
+    arms = [make_arm("base"), make_arm("trained")]
+
+    first = train_grpo._paired_eval(
+        arms,
+        None,
+        tasks,
+        "cpu",
+        generation_seed=1234,
+        generation_repeats=3,
+    )
+    second = train_grpo._paired_eval(
+        arms,
+        None,
+        tasks,
+        "cpu",
+        generation_seed=1234,
+        generation_repeats=3,
+    )
+
+    assert first == second
+    assert len(calls) == 2 * 3 * 2 * 2
+    for task in tasks:
+        task_calls = [call for call in calls if call[1] == task.prompt]
+        assert [call[2] for call in task_calls[::2]] == [
+            call[2] for call in task_calls[1::2]
+        ]
+        assert len({call[2] for call in task_calls[::2]}) == 3
+
+    summary = first["summary"]
+    assert summary["n_tasks"] == 2
+    assert summary["n_replicates"] == 3
+    assert summary["n_generation_samples"] == 6
+    assert summary["base_mean"] == pytest.approx(1.6)
+    assert summary["trained_mean"] == pytest.approx(1.8)
+    assert (summary["trained_wins"], summary["trained_losses"]) == (2, 0)
+    # The sign test sees two task-level means, not six task x replicate rows.
+    assert summary["sign_test_p"] == pytest.approx(0.5)
+    assert [row["delta"] for row in summary["replicate_summaries"]] == pytest.approx(
+        [0.2, 0.2, 0.2]
+    )
+    assert all(len(task["replicates"]) == 3 for task in first["per_task"])
+
+    with pytest.raises(ValueError, match="at least 1"):
+        train_grpo._paired_eval(arms, None, tasks, "cpu", generation_repeats=0)
+
+
+def test_generate_reuses_a_seed_without_leaking_rng_state():
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    from types import SimpleNamespace
+
+    from rlvr.train_grpo import _generate
+
+    class Tokenizer:
+        chat_template = None
+        pad_token_id = 0
+        eos_token_id = 1
+
+        def __call__(self, prompt, return_tensors):
+            return SimpleNamespace(input_ids=torch.tensor([[5]]))
+
+        def decode(self, ids, skip_special_tokens):
+            return str(int(ids[0]))
+
+    class Model:
+        def generate(self, input_ids, **kwargs):
+            token = torch.randint(2, 100, (1,))
+            return torch.cat([input_ids, token.unsqueeze(0)], dim=1)
+
+    torch.manual_seed(99)
+    expected_next = torch.random.get_rng_state()
+    expected_value = torch.randint(0, 100, (1,)).item()
+    torch.random.set_rng_state(expected_next)
+
+    first = _generate(Model(), Tokenizer(), "prompt", 1, 1, ".", "cpu", False, generation_seed=42)
+    second = _generate(Model(), Tokenizer(), "prompt", 1, 1, ".", "cpu", False, generation_seed=42)
+
+    assert first == second
+    assert torch.randint(0, 100, (1,)).item() == expected_value
+
+
+def test_fork_rng_devices_covers_all_visible_cuda_devices():
+    from rlvr.train_grpo import _fork_rng_devices
+
+    class Cuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def device_count():
+            return 3
+
+    class Torch:
+        cuda = Cuda()
+
+    assert _fork_rng_devices(Torch) == [0, 1, 2]
+
+
 # --- constrained decoding -------------------------------------------------
-
-transformers = pytest.importorskip("transformers")
-
 
 @pytest.fixture(scope="module")
 def tiny_tokenizer():
-    from transformers import AutoTokenizer
+    # Keep optional model dependencies from skipping CPU-only eval regressions.
+    transformers = pytest.importorskip("transformers")
 
-    return AutoTokenizer.from_pretrained("sshleifer/tiny-gpt2")
+    return transformers.AutoTokenizer.from_pretrained("sshleifer/tiny-gpt2")
 
 
 def test_build_allowed_token_map_single_chars_only(tiny_tokenizer):
@@ -99,7 +401,7 @@ def test_build_allowed_token_map_single_chars_only(tiny_tokenizer):
 
 
 def test_grid_processor_forces_newline_at_row_end(tiny_tokenizer):
-    import torch
+    torch = pytest.importorskip("torch")
 
     from rlvr.constrained import GridConstraintLogitsProcessor
 
@@ -131,7 +433,7 @@ def test_grid_processor_forces_eos_at_end_of_last_row(tiny_tokenizer):
     the last row's column count is reached, matching
     asciiart.verify.check_constraints (which expects exactly `rows` lines,
     not `rows` lines plus one trailing empty line)."""
-    import torch
+    torch = pytest.importorskip("torch")
 
     from rlvr.constrained import GridConstraintLogitsProcessor
 
@@ -156,7 +458,7 @@ def test_grid_processor_forces_eos_at_end_of_last_row(tiny_tokenizer):
 
 
 def test_grid_processor_forces_eos_after_eos_token_seen(tiny_tokenizer):
-    import torch
+    torch = pytest.importorskip("torch")
 
     from rlvr.constrained import GridConstraintLogitsProcessor
 
@@ -178,3 +480,32 @@ def test_grid_processor_forces_eos_after_eos_token_seen(tiny_tokenizer):
     out = proc(input_ids, scores)
     finite_ids = set((out[0] > float("-inf")).nonzero().flatten().tolist())
     assert finite_ids == {tiny_tokenizer.eos_token_id}
+
+
+def test_lora_arms_select_different_weights():
+    """The base arm is the adapter disabled, so the two arms share every
+    weight except the adapter -- and an adapter that changes the output must
+    change it between them. If both arms ran the same weights the sign test
+    could never see an effect."""
+    transformers = pytest.importorskip("transformers")
+    peft = pytest.importorskip("peft")
+    torch = pytest.importorskip("torch")
+
+    from rlvr.train_grpo import _lora_arms
+
+    model = peft.get_peft_model(
+        transformers.AutoModelForCausalLM.from_pretrained("sshleifer/tiny-gpt2"),
+        peft.LoraConfig(r=4, lora_alpha=8, target_modules=["c_attn"], task_type="CAUSAL_LM"),
+    )
+    # lora_B starts at zero, which makes an untrained adapter the identity
+    for name, param in model.named_parameters():
+        if "lora_B" in name:
+            torch.nn.init.normal_(param, std=0.5)
+    model.eval()
+
+    ids = torch.tensor([[1, 2, 3]])
+    logits = {}
+    for arm, m, context in _lora_arms(model):
+        with context(), torch.no_grad():
+            logits[arm] = m(ids).logits
+    assert not torch.allclose(logits["base"], logits["trained"])

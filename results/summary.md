@@ -15,11 +15,11 @@ full detail behind the numbers below.
 | Constrained decoding (logit masking) | `rlvr/constrained.py` | done-baseline (P2) |
 | Synthetic RLVR tasks | `rlvr/tasks.py` | done |
 | GRPO reward wrapper | `rlvr/reward.py` | done |
-| GRPO training entry point | `rlvr/train_grpo.py` | scaffolded, short run in progress on Sophia (P3) |
+| GRPO training entry point | `rlvr/train_grpo.py` | scaffolded, 600-step run done on Sophia (P3); `--eval-only` is a paired base-vs-adapter held-out eval |
 | `transformer_engine` import-shadow stub | `rlvr/_te_stub/` | done (works around a broken `libtransformer_engine.so` vs. loaded `libcublasLt` on Sophia that crashes `import peft`) |
-| PBS job scripts | `scripts/{train_sophia.pbs,rlvr_sophia.pbs,run_baseline_sophia.sh}` | done |
-| CI | `.github/workflows/ci.yml` | done -- runs `pytest tests/test_render.py tests/test_verify.py tests/test_anneal.py` on ubuntu-latest, does not run `test_pipeline.py` (needs `torch`+`pyfiglet`) or `test_rlvr.py` (needs `torch`+`transformers`) |
-| Legacy word-OCR pipeline, redesigned | `ascii_generator.py`, `data_prep.py`, `model.py`, `train.py`, `evaluate.py` | code done (2D grid positional embeddings + per-char cross-attention query heads); GPU validation run not yet completed as of this writeup |
+| PBS job scripts | `scripts/{train_sophia.pbs,rlvr_sophia.pbs,eval_pair.pbs,run_baseline_sophia.sh}` | done |
+| CI | `.github/workflows/ci.yml` | runs rendering, verifier, annealing, and deterministic CPU RLVR regressions on ubuntu-latest; optional RLVR model integration tests skip individually without ML dependencies, and `test_pipeline.py` remains outside this lightweight gate |
+| Legacy word-OCR pipeline, redesigned | `ascii_generator.py`, `data_prep.py`, `model.py`, `train.py`, `evaluate.py` | done -- 2D grid positional embeddings + per-char cross-attention query heads; GPU validation run 175613 gives per_char_acc 0.819 / exact_acc 0.545 |
 
 ## Numbers
 
@@ -45,6 +45,23 @@ Twenty wins, nineteen losses. That is a coin flip. The earlier "+13%"
 than a paired comparison; sampling variance between runs is larger than the
 effect being claimed, and running the same models against each other on the
 same tasks makes the difference vanish.
+
+The unpaired path is gone. `--eval-only` now runs the paired eval by
+default, the GRPO run ends with the same paired eval on the same held-out
+seed, and both go through one function (`rlvr.train_grpo._paired_eval`), so
+a base-vs-trained number can no longer come from two runs. The base-only
+constrained-decoding check keeps its own flag, `--eval-mode decoding`,
+because it compares decoding settings and not models.
+
+The evaluator now draws three independent, deterministically seeded decode
+replicates per task by default and averages them within each task before the
+sign test. Raw replicate rows are retained in the JSON artifact; pass
+`--generation-repeats 1` for the legacy single-draw comparison. The historical
+job 175888 numbers above remain a one-draw result and are not being rewritten.
+
+CPU regressions validate the replicate bookkeeping. A real three-replicate
+GPU evaluation has not been performed; this evaluator remains research code,
+and the CPU checks do not establish a model improvement or P3 qualification.
 
 Every previously reported P3 gain is now superseded:
 
@@ -135,7 +152,8 @@ smooth gradients to near-blank, which is also why blank and oracle were
 indistinguishable to SSIM in the first place.
 
 **All P3 numbers below are therefore against the broken reward and do not
-carry over.** Job 175859 re-runs GRPO against the corrected verifier.
+carry over.** The re-run against the corrected verifier is done, and it is
+paired: see the P3 verdict at the top of this page (job 175888).
 
 ### P0/P1 -- converter + verifier + anneal (`results/bench.md`)
 
@@ -214,7 +232,11 @@ whether reward climbs via SSIM alone -- that would be the uniform-fill hack
 appearing, and is the first thing to check before believing any reward gain.
 
 
-### GRPO learns once the hack is closed (job 175665, 600 steps)
+### GRPO learns once the hack is closed (job 175665, 600 steps) -- superseded
+
+**Superseded.** The reward below is the broken pixel reward. The training
+curve it shows is real, but it does not transfer: the paired test at the top
+of this page finds no held-out effect.
 
 600 steps, Qwen2.5-0.5B-Instruct + LoRA, 24x12 grid, 8 generations, 40 tasks,
 2h04m on one GPU. Means over consecutive 100-step windows:
@@ -241,9 +263,17 @@ competitive method. The reward is training-time on the training tasks; run
 175665 set `save_strategy="no"` and saved no adapter, so there was no artifact
 to sample or to score on held-out tasks. Job **175759** repeats the run with
 the adapter persisted and a post-training eval on a disjoint task seed, which
-is the number that would actually support a claim.
+is the number that would actually support a claim. It did not: job 175759
+compared a trained mean against a base mean from a separate run, and pairing
+that comparison removed it.
 
-### Held-out eval with the trained adapter (job 175759)
+### Held-out eval with the trained adapter (job 175759) -- void
+
+**Void on two counts.** The reward is the broken pixel reward, and the
+comparison is unpaired: the base and trained numbers come from two separate
+stochastic decoding runs, so the ratio below measures run-to-run spread as
+much as it measures training. Job 175888 pairs the two arms and finds no
+effect. Kept for the record of how the claim was made.
 
 Repeat of the 600-step run with the LoRA adapter persisted and a
 post-training eval on 40 tasks generated from a disjoint seed:
@@ -253,8 +283,10 @@ post-training eval on 40 tasks generated from a disjoint seed:
 | base model, constrained (training seed) | 1.00 | 0.0117 | 0.206 |
 | trained adapter, constrained (held-out seed) | 1.00 | 0.0287 | 0.212 |
 
-The gain survives on tasks the policy never trained on: **2.4x the base
-model's reward**, at 14% of the deterministic converter's score. The training
+Read at the time as surviving on tasks the policy never trained on: **2.4x
+the base model's reward**, at 14% of the deterministic converter's score.
+The two rows are from different runs and different task seeds, so the ratio
+was never a comparison of one thing against another. The training
 curve reproduced the earlier run almost exactly (0.0092 -> 0.0400 across six
 100-step windows, edge 0.023 -> 0.100, SSIM 0.228 -> 0.165), so the effect is
 not a seed artifact.
@@ -273,10 +305,9 @@ BASE  reward=0.0068          TRAINED  reward=0.0266     ORACLE reward=0.2034
 Both models are mostly emitting charset-ordered filler rather than a shape.
 Training compacted the filler and roughly quadrupled the edge score, which is
 what the reward asked for, but the output is not recognizably a circle. The
-honest summary is that RLVR against this verifier produces a real, held-out,
-monotonic gain and a policy that is still nowhere near the converter it is
-being scored against. Closing that gap is a scale/steps question that 600
-steps on a 0.5B model does not answer.
+summary written at the time -- a real, held-out, monotonic gain from a policy
+still far below the converter -- holds only for the training curve. The
+held-out half of it does not survive pairing.
 
 ### The empty-grid reward hack (found 2026-08-19, fixed)
 
@@ -308,18 +339,6 @@ Bench numbers after the fix (previous values in parentheses):
 
 Ordering is unchanged; every method loses the free SSIM floor it was being
 paid before.
-
-### Open issues
-
-- `render(mode="structure")` renders a smooth 0->255 gradient as an
-  **all-blank grid**. The per-cell glyph match is dominated by gradient
-  structure, so a smooth cell picks space regardless of its brightness. This
-  made `test_score_perfect_self_match` vacuous (it asserted a high score on
-  blank-vs-blank); the test now uses a circle. The converter behavior itself
-  is unfixed.
-- The SSIM term contributes almost nothing on these synthetic targets; the
-  reward is effectively edge-F1 with an SSIM tiebreaker. A perceptual metric
-  better suited to sparse ink would be the real fix.
 
 ### Legacy word-OCR baseline (before redesign)
 
@@ -366,11 +385,20 @@ qsub scripts/train_sophia.pbs
 
 Local `pytest -q`: with `PYTHONPATH=.`, excluding `tests/test_pipeline.py`
 (needs `pyfiglet`, not installed in this checkout's `.venv` and `.venv` has
-no `pip` to add it) -- 34 passed, 0 failed. `tests/test_rlvr.py` needs
+no `pip` to add it) -- 41 passed, 0 failed. `tests/test_rlvr.py` needs
 `torch`/`transformers`, both present in `.venv`, and passes as part of that run.
 
 ## Open issues
 
+- `render(mode="structure")` renders a smooth 0->255 gradient as an
+  **all-blank grid**. The per-cell glyph match is dominated by gradient
+  structure, so a smooth cell picks space regardless of its brightness. This
+  made `test_score_perfect_self_match` vacuous (it asserted a high score on
+  blank-vs-blank); the test now uses a circle. The converter behavior itself
+  is unfixed.
+- The SSIM term contributes almost nothing on these synthetic targets; the
+  reward is effectively edge-F1 with an SSIM tiebreaker. A perceptual metric
+  better suited to sparse ink would be the real fix.
 - `eval_1787114710.jsonl` on sophia shows an all-zero constrained result
   that contradicts the constrained-decoding guarantee (100% valid rows by
   construction) -- looks like a broken first attempt superseded by
@@ -382,14 +410,8 @@ no `pip` to add it) -- 34 passed, 0 failed. `tests/test_rlvr.py` needs
   image-count criteria (40/50, 45/50) have not been checked.
 - P3 acceptance criteria (35/50 images improved over base model,
   no-stratum-regression check, reward-hacking checks from `docs/design.md`)
-  have not been run -- only a baseline eval and a short 50-step GRPO smoke
-  run are in flight.
-- Legacy-OCR redesign has unit-test coverage but no completed GPU training
-  run showing per_char_acc/exact_acc above the 0.122/0.002 baseline; job
-  175613 is intended to produce that number.
+  have not been run. The paired test that has been run is 40 tasks, not the
+  50-image evaluation set, and it finds no held-out effect to stratify.
 - `tests/test_pipeline.py` cannot run in this checkout's `.venv` (no `pip`
   available to install `pyfiglet`); CI installs it separately and is not
   affected.
-- CLI `--help` at the top level (`python -m asciiart.cli --help`) previously
-  fell through to the `render` subparser's help instead of listing
-  `render`/`verify`/`anneal`; fixed in `asciiart/cli.py`.
